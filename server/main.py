@@ -59,6 +59,9 @@ async def health_ws(websocket: WebSocket):
                 continue
 
             # ── Date senzori normali ───────────────────────
+            if pachete_count % 5 == 0:
+                s = processor.stats
+                print(f"  [#{pachete_count}] lin_var={s.linear_acc_variance:.3f} gyro={s.gyro_mean:.3f} HR={s.hr:.0f} samples={s.sample_count}")
             analysis_result = processor.add_data(payload)
 
             # Verifică reminder medicație la fiecare pachet
@@ -118,13 +121,35 @@ async def daily_report(date: str = None):
 # ──────────────────────────────────────────────
 
 def _log(result: dict):
-    print("\n" + "=" * 40)
-    print(f" DECIZIE | {datetime.now().strftime('%H:%M:%S')}")
-    print(f" STARE: {result.get('state', '?').upper()}")
-    if result.get('action'):
+    d = result.get("_debug", {})
+    state = result.get("state", "?").upper()
+
+    print("\n" + "=" * 48)
+    print(f" VERDICT | {datetime.now().strftime('%H:%M:%S')}")
+    print(f" STARE:   {state}")
+    if result.get("action"):
         print(f" ACTIUNE: {result['action']}")
-    print(f" MESAJ: {result.get('message', '')}")
-    print("=" * 40)
+    print(f" MESAJ:   {result.get('message', '')}")
+
+    if d:
+        print(f" ┌─ Analiză ──────────────────────────────")
+        print(f" │  linear_acc_var = {d.get('lin_var', '?'):<8}  (fidgeting: 0.05–0.5, mers: >1.0)")
+        print(f" │  gyro_mean      = {d.get('gyro_mean', '?'):<8}  (rotație: >0.2 = mișcă, >0.5 = mare)")
+        print(f" │  gyro_var       = {d.get('gyro_var', '?'):<8}  (repetitiv: <0.3)")
+        print(f" │  HR             = {d.get('hr', '?'):<8}  ", end="")
+        if d.get("focus_active") and d.get("baseline_hr"):
+            diff = round(d["hr"] - d["baseline_hr"], 1)
+            sign = "+" if diff >= 0 else ""
+            print(f"(baseline {d['baseline_hr']} → {sign}{diff} BPM)")
+        else:
+            print(f"(anxietate: >110)")
+        if d.get("light_diff", 0) > 0:
+            print(f" │  light_diff    = {d.get('light_diff', '?'):<8}  (epilepsie: >200)")
+        print(f" │  samples        = {d.get('samples', '?')}")
+        if d.get("focus_active"):
+            print(f" │  focus activ    = DA  (exits: {result.get('exits_count', 0)})")
+        print(f" └────────────────────────────────────────")
+    print("=" * 48)
 
 
 if __name__ == "__main__":

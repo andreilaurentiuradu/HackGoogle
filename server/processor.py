@@ -79,8 +79,8 @@ class StreamingStats:
 
 
 class DataStreamProcessor:
-    WARMUP_SECONDS  = 20   # așteptăm să se stabilizeze EMA
-    VERDICT_SECONDS = 20   # verdict la fiecare 20s
+    WARMUP_SECONDS  = 10   # așteptăm să se stabilizeze EMA
+    VERDICT_SECONDS = 10   # verdict la fiecare 10s
 
     def __init__(self, brain):
         self.brain            = brain

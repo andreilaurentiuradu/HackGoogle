@@ -5,8 +5,8 @@ import random
 import time
 import requests
 
-SERVER_HTTP = "http://localhost:8000"
-SERVER_WS   = "ws://localhost:8000/ws/health"
+SERVER_HTTP = "http://localhost:8001"
+SERVER_WS   = "ws://localhost:8001/ws/health"
 
 def http_post(path, body=None):
     r = requests.post(f"{SERVER_HTTP}{path}", json=body or {})

@@ -26,6 +26,17 @@ class DecisionBrain:
         if result is None:
             result = {"state": "normal", "confidence": 1.0, "message": "Totul este in regula."}
 
+        result["_debug"] = {
+            "lin_var":   round(stats.linear_acc_variance, 4),
+            "gyro_mean": round(stats.gyro_mean, 4),
+            "gyro_var":  round(stats.gyro_variance, 4),
+            "hr":        round(stats.hr, 1),
+            "light_diff": round(stats.light_diff, 1),
+            "samples":   stats.sample_count,
+            "focus_active": self.focus.active,
+            "baseline_hr":  round(self.focus.baseline_hr, 1) if self.focus.active else None,
+        }
+
         # Focus session: înregistrează stats și detectează ieșirile
         if self.focus.active:
             self.focus.record_stats(stats)
