@@ -9,63 +9,83 @@ import androidx.activity.compose.setContent
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.health.services.client.HealthServices
-import androidx.health.services.client.MeasureCallback
-import androidx.health.services.client.data.Availability
+import androidx.health.services.client.PassiveListenerCallback
 import androidx.health.services.client.data.DataPointContainer
 import androidx.health.services.client.data.DataType
-import androidx.health.services.client.data.DeltaDataType
-import androidx.lifecycle.lifecycleScope
+import androidx.health.services.client.data.PassiveListenerConfig
+import androidx.health.services.client.data.UserActivityInfo
+import androidx.health.services.client.data.UserActivityState
 import androidx.wear.compose.material.*
 import androidx.compose.runtime.*
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
+import androidx.health.services.client.data.DeltaDataType
+import androidx.health.services.client.data.SampleDataPoint
+import androidx.health.services.client.data.IntervalDataPoint
+
+data class HealthMetric(
+    val name: String,
+    val value: String = "N/A"
+)
 
 class MainActivity : ComponentActivity() {
 
     private val HR_PERMISSION = "android.permission.health.READ_HEART_RATE"
 
-    private val measureClient by lazy {
-        HealthServices.getClient(this).measureClient
+    private val passiveClient by lazy {
+        HealthServices.getClient(this).passiveMonitoringClient
     }
 
-    private var heartRate by mutableStateOf<Double?>(null)
-    private var status by mutableStateOf("Pornesc...")
+    private var status by mutableStateOf("Pornesc Passive Monitoring...")
+    private var metrics by mutableStateOf(
+        mapOf(
+            "Heart rate" to HealthMetric("Heart rate"),
+            "Steps daily" to HealthMetric("Steps daily"),
+            "Calories daily" to HealthMetric("Calories daily"),
+            "Distance daily" to HealthMetric("Distance daily"),
+            "Floors daily" to HealthMetric("Floors daily"),
+            "Activity state" to HealthMetric("Activity state")
+        )
+    )
 
-    private var isRegistered = false
-    private var permissionsRequested = false
+    private var isPassiveRegistered = false
 
-    private val measureCallback = object : MeasureCallback {
+    private val dataTypes = setOf(
+        DataType.HEART_RATE_BPM,
+        DataType.STEPS_DAILY,
+        DataType.CALORIES_DAILY,
+        DataType.DISTANCE_DAILY,
+        DataType.FLOORS_DAILY
+    )
 
-        override fun onAvailabilityChanged(
-            dataType: DeltaDataType<*, *>,
-            availability: Availability
-        ) {
-            Log.d("HR_REAL", "Availability: $availability")
-            runOnUiThread {
-                status = "Availability: $availability"
-            }
+    private val passiveCallback = object : PassiveListenerCallback {
+        override fun onNewDataPointsReceived(dataPoints: DataPointContainer) {
+            Log.d("PASSIVE_HEALTH", "New data: $dataPoints")
+
+            updateFromDataPoints("Heart rate", dataPoints, DataType.HEART_RATE_BPM, "bpm")
+            updateFromDataPoints("Steps daily", dataPoints, DataType.STEPS_DAILY, "steps")
+            updateFromDataPoints("Calories daily", dataPoints, DataType.CALORIES_DAILY, "kcal")
+            updateFromDataPoints("Distance daily", dataPoints, DataType.DISTANCE_DAILY, "m")
+            updateFromDataPoints("Floors daily", dataPoints, DataType.FLOORS_DAILY, "floors")
         }
 
-        override fun onDataReceived(data: DataPointContainer) {
-            val values = data.getData(DataType.HEART_RATE_BPM)
-            val latest = values.lastOrNull()?.value
+        override fun onUserActivityInfoReceived(info: UserActivityInfo) {
+            Log.d("PASSIVE_HEALTH", "Activity info: $info")
 
-            Log.d("HR_REAL", "RAW HR DATA: $values")
-            Log.d("HR_REAL", "LATEST HR: $latest")
-
-            if (latest != null && latest > 0.0) {
-                runOnUiThread {
-                    heartRate = latest
-                    status = "Puls real primit"
-                }
-
-                Log.d("HR_REAL", "PULS REAL: $latest BPM")
+            runOnUiThread {
+                updateMetric(
+                    "Activity state",
+                    info.userActivityState.toString()
+                )
             }
         }
     }
@@ -75,9 +95,9 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                WearApp(
-                    heartRate = heartRate,
-                    status = status
+                PassiveHealthScreen(
+                    status = status,
+                    metrics = metrics.values.toList()
                 )
             }
         }
@@ -88,55 +108,54 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
 
-        if (hasHeartPermission()) {
-            startHeartRate()
-        } else if (!permissionsRequested) {
-            requestPermissionsIfNeeded()
+        if (hasPermissions()) {
+            startPassiveMonitoring()
         }
     }
 
     override fun onPause() {
-        stopHeartRate()
         super.onPause()
+        stopPassiveMonitoring()
     }
 
     override fun onDestroy() {
-        stopHeartRate()
+        stopPassiveMonitoring()
         super.onDestroy()
     }
 
-    private fun hasHeartPermission(): Boolean {
-        val bodySensorsGranted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) ==
-                    PackageManager.PERMISSION_GRANTED
-
-        val readHeartRateGranted =
+    private fun hasPermissions(): Boolean {
+        val heartGranted =
             ContextCompat.checkSelfPermission(this, HR_PERMISSION) ==
+                    PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) ==
                     PackageManager.PERMISSION_GRANTED
 
-        Log.d("HR_REAL", "BODY_SENSORS granted = $bodySensorsGranted")
-        Log.d("HR_REAL", "READ_HEART_RATE granted = $readHeartRateGranted")
+        val activityGranted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) ==
+                    PackageManager.PERMISSION_GRANTED
 
-        return bodySensorsGranted || readHeartRateGranted
+        Log.d("PASSIVE_HEALTH", "heartGranted=$heartGranted activityGranted=$activityGranted")
+
+        return heartGranted && activityGranted
     }
 
     private fun requestPermissionsIfNeeded() {
-        if (hasHeartPermission()) {
-            status = "Permisiuni deja acceptate"
-            startHeartRate()
+        if (hasPermissions()) {
+            status = "Permisiuni acceptate"
+            startPassiveMonitoring()
             return
         }
 
-        permissionsRequested = true
         status = "Cer permisiuni..."
 
         ActivityCompat.requestPermissions(
             this,
             arrayOf(
+                Manifest.permission.ACTIVITY_RECOGNITION,
                 Manifest.permission.BODY_SENSORS,
                 HR_PERMISSION
             ),
-            100
+            200
         )
     }
 
@@ -147,124 +166,162 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-        if (requestCode == 100) {
-            Log.d("HR_REAL", "Permissions result: ${permissions.toList()}")
-            Log.d("HR_REAL", "Grant results: ${grantResults.toList()}")
+        if (requestCode == 200) {
+            Log.d("PASSIVE_HEALTH", "permissions=${permissions.toList()}")
+            Log.d("PASSIVE_HEALTH", "grantResults=${grantResults.toList()}")
 
-            if (hasHeartPermission()) {
+            if (hasPermissions()) {
                 status = "Permisiuni acceptate"
-                startHeartRate()
+                startPassiveMonitoring()
             } else {
-                status = "Permisiune refuzată"
-                Log.e("HR_REAL", "Permisiune refuzată real")
+                status = "Permisiuni lipsă"
             }
         }
     }
 
-    private fun startHeartRate() {
-        if (isRegistered) return
+    private fun startPassiveMonitoring() {
+        if (isPassiveRegistered) return
 
         lifecycleScope.launch {
             try {
-                status = "Verific senzor puls..."
+                status = "Verific Passive Capabilities..."
 
-                val capabilities = measureClient.getCapabilitiesAsync().await()
+                val capabilities = passiveClient.getCapabilitiesAsync().await()
+                val supported = capabilities.supportedDataTypesPassiveMonitoring
 
-                Log.d(
-                    "HR_REAL",
-                    "Supported measure types: ${capabilities.supportedDataTypesMeasure}"
-                )
+                Log.d("PASSIVE_HEALTH", "Supported passive types: $supported")
 
-                if (DataType.HEART_RATE_BPM !in capabilities.supportedDataTypesMeasure) {
-                    status = "HEART_RATE_BPM nu e suportat"
-                    Log.e("HR_REAL", "HEART_RATE_BPM nu e suportat")
+                val supportedTypes = dataTypes.filter { it in supported }.toSet()
+
+                Log.d("PASSIVE_HEALTH", "Registering passive types: $supportedTypes")
+
+                if (supportedTypes.isEmpty()) {
+                    status = "Niciun DataType pasiv suportat"
                     return@launch
                 }
 
-                measureClient.registerMeasureCallback(
-                    DataType.HEART_RATE_BPM,
-                    measureCallback
-                )
+                val config = PassiveListenerConfig.builder()
+                    .setDataTypes(supportedTypes)
+                    .setShouldUserActivityInfoBeRequested(true)
+                    .build()
 
-                isRegistered = true
-                status = "Aștept puls real..."
+                passiveClient.setPassiveListenerCallback(config, passiveCallback)
 
-                Log.d("HR_REAL", "MeasureCallback registered")
+                isPassiveRegistered = true
+                status = "Passive Monitoring activ"
 
             } catch (e: Exception) {
-                status = "Eroare Health Services"
-                Log.e("HR_REAL", "Eroare Health Services", e)
+                status = "Eroare Passive"
+                Log.e("PASSIVE_HEALTH", "Passive error", e)
             }
         }
     }
 
-    private fun stopHeartRate() {
-        if (!isRegistered) return
+    private fun stopPassiveMonitoring() {
+        if (!isPassiveRegistered) return
 
         lifecycleScope.launch {
             try {
-                measureClient.unregisterMeasureCallbackAsync(
-                    DataType.HEART_RATE_BPM,
-                    measureCallback
-                ).await()
-
-                isRegistered = false
-                status = "Măsurare oprită"
-
-                Log.d("HR_REAL", "MeasureCallback unregistered")
-
+                passiveClient.clearPassiveListenerCallbackAsync().await()
+                isPassiveRegistered = false
+                status = "Passive Monitoring oprit"
+                Log.d("PASSIVE_HEALTH", "Passive callback cleared")
             } catch (e: Exception) {
-                Log.e("HR_REAL", "Unregister error", e)
+                Log.e("PASSIVE_HEALTH", "Clear passive error", e)
+            }
+        }
+    }
+
+    private fun updateFromDataPoints(
+        metricName: String,
+        container: DataPointContainer,
+        dataType: DeltaDataType<*, *>,
+        unit: String
+    ) {
+        val points = container.getData(dataType)
+        val latest = points.lastOrNull() ?: return
+
+        val value = when (latest) {
+            is androidx.health.services.client.data.SampleDataPoint<*> -> {
+                latest.value.toString()
+            }
+
+            is androidx.health.services.client.data.IntervalDataPoint<*> -> {
+                latest.value.toString()
+            }
+
+            else -> {
+                latest.toString()
+            }
+        }
+
+        runOnUiThread {
+            updateMetric(metricName, "$value $unit")
+        }
+    }
+
+    private fun updateMetric(name: String, value: String) {
+        metrics = metrics.toMutableMap().apply {
+            this[name] = HealthMetric(name, value)
+        }
+    }
+}
+
+@Composable
+fun PassiveHealthScreen(
+    status: String,
+    metrics: List<HealthMetric>
+) {
+    Scaffold(
+        timeText = { TimeText() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Passive Health",
+                style = MaterialTheme.typography.title3,
+                color = Color.White
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = status,
+                style = MaterialTheme.typography.caption3,
+                color = Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            metrics.forEach {
+                MetricLine(it)
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }
 }
 
 @Composable
-fun WearApp(
-    heartRate: Double?,
-    status: String
-) {
-    Scaffold(
-        timeText = { TimeText() }
+fun MetricLine(metric: HealthMetric) {
+    Column(
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "❤️",
-                    style = MaterialTheme.typography.display1
-                )
+        Text(
+            text = metric.name,
+            style = MaterialTheme.typography.caption2,
+            color = Color.White
+        )
 
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text(
-                    text = heartRate?.toInt()?.toString() ?: "--",
-                    style = MaterialTheme.typography.display2,
-                    color = Color.Red
-                )
-
-                Text(
-                    text = "BPM",
-                    style = MaterialTheme.typography.caption1,
-                    color = Color.White
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = status,
-                    style = MaterialTheme.typography.caption3,
-                    color = Color.Gray,
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-            }
-        }
+        Text(
+            text = metric.value,
+            style = MaterialTheme.typography.caption1,
+            color = Color.Green
+        )
     }
 }
