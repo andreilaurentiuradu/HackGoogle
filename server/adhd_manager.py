@@ -90,8 +90,8 @@ class FocusSessionManager:
 
 
 class HyperfocusDetector:
-    # Flow = 60 ferestre × 20s verdict = 20 minute continue
-    WINDOWS_FOR_FLOW = 60
+    # Flow = 120 ferestre × 10s verdict = 20 minute continue
+    WINDOWS_FOR_FLOW = 120
 
     def __init__(self):
         self.flow_start_time = None
