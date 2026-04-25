@@ -35,6 +35,9 @@ import kotlinx.coroutines.launch
 import okhttp3.*
 import java.util.concurrent.TimeUnit
 
+// TODO: Adaugă în AndroidManifest.xml: <uses-permission android:name="android.permission.VIBRATE" />
+// TODO: Creează HapticManager.kt cu pattern-uri vibrate: ANCHOR, PRE_FOCUS_BREATH, FOCUS_EXIT, HYPERFOCUS_SOFT, MEDICATION
+
 data class HealthMetric(
     val name: String,
     val value: String = "N/A"
@@ -169,6 +172,34 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     Log.d("WS_HEALTH", "Server response: $text")
                     runOnUiThread {
                         wsStatus = "Server: $text"
+                        // TODO: Parsează JSON-ul și rutează după câmpul "state":
+                        // "adhd_high_activity" → HapticManager.vibrate(ANCHOR)
+                        // "pre_focus_ritual"   → citește breaths=3, inhale_ms=5000, exhale_ms=5000
+                        //                        bucla pentru fiecare respirație:
+                        //                          afișează "Inspiră ████████████"
+                        //                          vibrate(inhale_ms)          ← vibrație continuă 5s
+                        //                          afișează "Expiră  ████████████"
+                        //                          vibrate(exhale_ms)          ← vibrație continuă 5s
+                        //                        după cele 3 respirații (30s total) afișează "Gata? ✓"
+                        //                        la tap ✓ → trimite {"action":"focus_ready"}
+                        // "focus_started"      → pornește timer-ul pe ecran
+                        //                        TODO: activează Do Not Disturb pe durata sesiunii:
+                        //                          val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                        //                          if (nm.isNotificationPolicyAccessGranted)
+                        //                              nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE)
+                        //                        TODO: dezactivează DND la "focus_complete" sau "focus_end"
+                        //                              nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
+                        //                        TODO: adaugă în AndroidManifest.xml:
+                        //                              <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+                        // "focus_exit"         → HapticManager.vibrate(FOCUS_EXIT) + afișează exits_count din JSON
+                        // "focus_complete"     → afișează ecran raport cu:
+                        //                        duration_minutes, quality_percent, exits_count,
+                        //                        acc_stability_percent, hr_variability
+                        // "hyperfocus_alert"   → HapticManager.vibrate(HYPERFOCUS_SOFT) + Toast cu message
+                        // "medication_reminder"→ HapticManager.vibrate(MEDICATION) +
+                        //                        Dialog "Medicație? ✓/✗" →
+                        //                        dacă ✓: trimite {"action":"medication_taken","time":...}
+                        //                        dacă ✗: trimite {"action":"medication_skipped","time":...}
                     }
                 }
 
@@ -217,6 +248,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         sendingJob?.cancel()
         sendingJob = null
     }
+
+    // TODO: Adaugă fun sendAction(action: String, extra: Map<String,Any> = emptyMap())
+    //       care trimite {"action": action, ...extra} via webSocket?.send(gson.toJson(...))
+    // TODO: Adaugă fun startFocusSession() → sendAction("focus_start")
+    // TODO: Adaugă fun endFocusSession()   → sendAction("focus_end")
 
     private fun sendHealthData() {
         if (!isWsConnected || webSocket == null) {
@@ -459,6 +495,12 @@ fun HealthScreen(
         ) {
             Text("ML Sensor Stream", style = MaterialTheme.typography.title3, color = Color.White)
             Spacer(modifier = Modifier.height(6.dp))
+            // TODO: Adaugă buton "Start Focus" care apelează startFocusSession()
+            //       și "Stop Focus" când sesiunea e activă → endFocusSession()
+            // TODO: Adaugă ecran FocusSessionScreen cu timer + raport calitate la final
+            // TODO: Adaugă ecran MedicationScreen pentru setarea orelor reminder
+            //       → POST /medication/schedule cu lista de ore
+            // TODO: Adaugă ecran ReportScreen → GET /report/daily afișat la cerere
 
             MetricLine("status", status)
             MetricLine("ws", wsStatus)
