@@ -22,7 +22,7 @@ async def send_payload(websocket, scenario_name, heart_rate, accel, light):
         print(f"\n[DECIZIE SERVER] Scenariu: {scenario_name} -> Stare: {res_json['state']} ({res_json['message']})")
 
 async def simulate_watch():
-    uri = "ws://localhost:8000/ws/health"
+    uri = "ws://localhost:8001/ws/health"
     try:
         async with websockets.connect(uri) as websocket:
             print("--- START TEST 10Hz ---")

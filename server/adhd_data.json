@@ -1,0 +1,66 @@
+{
+  "sessions": [
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:16:56.875287",
+      "end_time": "2026-04-25T20:17:23.706030",
+      "duration_minutes": 1,
+      "quality_percent": 100,
+      "exits_count": 0,
+      "acc_stability_percent": 100,
+      "hr_variability": "constant"
+    },
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:19:18.526928",
+      "end_time": "2026-04-25T20:20:04.908642",
+      "duration_minutes": 1,
+      "quality_percent": 33,
+      "exits_count": 6,
+      "acc_stability_percent": 12,
+      "hr_variability": "variabil"
+    },
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:21:55.807666",
+      "end_time": "2026-04-25T20:22:42.634958",
+      "duration_minutes": 1,
+      "quality_percent": 34,
+      "exits_count": 6,
+      "acc_stability_percent": 13,
+      "hr_variability": "variabil"
+    },
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:35:24.954579",
+      "end_time": "2026-04-25T20:36:10.777605",
+      "duration_minutes": 1,
+      "quality_percent": 76,
+      "exits_count": 3,
+      "acc_stability_percent": 58,
+      "hr_variability": "variabil"
+    },
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:48:31.539741",
+      "end_time": "2026-04-25T20:49:17.344333",
+      "duration_minutes": 1,
+      "quality_percent": 92,
+      "exits_count": 1,
+      "acc_stability_percent": 62,
+      "hr_variability": "constant"
+    },
+    {
+      "date": "2026-04-25",
+      "start_time": "2026-04-25T20:56:35.991051",
+      "end_time": "2026-04-25T20:57:21.851323",
+      "duration_minutes": 1,
+      "quality_percent": 92,
+      "exits_count": 1,
+      "acc_stability_percent": 55,
+      "hr_variability": "constant"
+    }
+  ],
+  "medication_logs": [],
+  "medication_schedule": []
+}
