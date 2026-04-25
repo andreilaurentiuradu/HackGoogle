@@ -1,6 +1,7 @@
 package ro.pub.cs.systems.eim.googlehack.presentation
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -9,6 +10,7 @@ import android.hardware.*
 import android.os.BatteryManager
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -27,16 +29,17 @@ import androidx.health.services.client.PassiveListenerCallback
 import androidx.health.services.client.data.*
 import androidx.lifecycle.lifecycleScope
 import androidx.wear.compose.material.*
+import androidx.wear.compose.material.dialog.Alert
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.*
 import java.util.concurrent.TimeUnit
-
-// TODO: Adaugă în AndroidManifest.xml: <uses-permission android:name="android.permission.VIBRATE" />
-// TODO: Creează HapticManager.kt cu pattern-uri vibrate: ANCHOR, PRE_FOCUS_BREATH, FOCUS_EXIT, HYPERFOCUS_SOFT, MEDICATION
 
 data class HealthMetric(
     val name: String,
@@ -49,6 +52,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val SERVER_URL = "ws://10.200.22.124:8000/ws/health"
 
     private val gson = Gson()
+
     private val wsClient = OkHttpClient.Builder()
         .pingInterval(10, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -70,6 +74,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var status by mutableStateOf("Pornesc...")
     private var wsStatus by mutableStateOf("WebSocket: neconectat")
+
+    private var isFocusActive by mutableStateOf(false)
+    private var focusSeconds by mutableStateOf(0)
+    private var focusTimerJob: Job? = null
+
+    private var focusReport by mutableStateOf<JsonObject?>(null)
+    private var showMedicationDialog by mutableStateOf(false)
+    private var exitsCount by mutableStateOf<Int?>(null)
 
     private val passiveClient by lazy {
         HealthServices.getClient(this).passiveMonitoringClient
@@ -108,7 +120,28 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     activityState = activityState,
                     accelerometer = accelerometer,
                     gyroscope = gyroscope,
-                    light = light
+                    light = light,
+                    isFocusActive = isFocusActive,
+                    focusSeconds = focusSeconds,
+                    focusReport = focusReport,
+                    exitsCount = exitsCount,
+                    showMedicationDialog = showMedicationDialog,
+                    onStartFocus = { startFocusSession() },
+                    onStopFocus = { endFocusSession() },
+                    onMedicationTaken = {
+                        showMedicationDialog = false
+                        sendAction(
+                            "medication_taken",
+                            mapOf("time" to System.currentTimeMillis())
+                        )
+                    },
+                    onMedicationSkipped = {
+                        showMedicationDialog = false
+                        sendAction(
+                            "medication_skipped",
+                            mapOf("time" to System.currentTimeMillis())
+                        )
+                    }
                 )
             }
         }
@@ -119,6 +152,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
+
         connectWebSocket()
         startAndroidSensors()
         startSendingLoop()
@@ -130,6 +164,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onPause() {
         super.onPause()
+
         stopSendingLoop()
         stopPassiveMonitoring()
         stopAndroidSensors()
@@ -157,6 +192,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         webSocket = wsClient.newWebSocket(
             request,
             object : WebSocketListener() {
+
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     isWsConnected = true
                     this@MainActivity.webSocket = webSocket
@@ -170,40 +206,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     Log.d("WS_HEALTH", "Server response: $text")
+
                     runOnUiThread {
-                        wsStatus = "Server: $text"
-                        // TODO: Parsează JSON-ul și rutează după câmpul "state":
-                        // "adhd_high_activity" → HapticManager.vibrate(ANCHOR)
-                        // "pre_focus_ritual"   → citește breaths=3, inhale_ms=5000, exhale_ms=5000
-                        //                        bucla pentru fiecare respirație:
-                        //                          afișează "Inspiră ████████████"
-                        //                          vibrate(inhale_ms)          ← vibrație continuă 5s
-                        //                          afișează "Expiră  ████████████"
-                        //                          vibrate(exhale_ms)          ← vibrație continuă 5s
-                        //                        după cele 3 respirații (30s total) afișează "Gata? ✓"
-                        //                        la tap ✓ → trimite {"action":"focus_ready"}
-                        // "focus_started"      → pornește timer-ul pe ecran
-                        //                        TODO: activează Do Not Disturb pe durata sesiunii:
-                        //                          val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                        //                          if (nm.isNotificationPolicyAccessGranted)
-                        //                              nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE)
-                        //                        TODO: dezactivează DND la "focus_complete" sau "focus_end"
-                        //                              nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
-                        //                        TODO: adaugă în AndroidManifest.xml:
-                        //                              <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-                        // "focus_exit"         → HapticManager.vibrate(FOCUS_EXIT) + afișează exits_count din JSON
-                        // "focus_complete"     → afișează ecran raport cu:
-                        //                        duration_minutes, quality_percent, exits_count,
-                        //                        acc_stability_percent, hr_variability
-                        // "hyperfocus_alert"   → HapticManager.vibrate(HYPERFOCUS_SOFT) + Toast cu message
-                        // "medication_reminder"→ HapticManager.vibrate(MEDICATION) +
-                        //                        Dialog "Medicație? ✓/✗" →
-                        //                        dacă ✓: trimite {"action":"medication_taken","time":...}
-                        //                        dacă ✗: trimite {"action":"medication_skipped","time":...}
+                        handleServerMessage(text)
                     }
                 }
 
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                override fun onFailure(
+                    webSocket: WebSocket,
+                    t: Throwable,
+                    response: Response?
+                ) {
                     isWsConnected = false
                     this@MainActivity.webSocket = null
 
@@ -233,6 +246,169 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         wsStatus = "WebSocket: închis"
     }
 
+    private fun handleServerMessage(text: String) {
+        try {
+            val json = JsonParser.parseString(text).asJsonObject
+            val state = json.get("state")?.asString ?: return
+
+            wsStatus = "Server state: $state"
+
+            when (state) {
+                "adhd_high_activity" -> {
+                    HapticManager.vibrate(this, HapticPattern.ANCHOR)
+                    status = "Activitate ridicată detectată"
+                }
+
+                "pre_focus_ritual" -> {
+                    val breaths = json.get("breaths")?.asInt ?: 3
+                    val inhaleMs = json.get("inhale_ms")?.asLong ?: 5000L
+                    val exhaleMs = json.get("exhale_ms")?.asLong ?: 5000L
+
+                    lifecycleScope.launch {
+                        repeat(breaths) {
+                            status = "Inspiră ████████████"
+                            HapticManager.vibrateDuration(this@MainActivity, inhaleMs)
+                            delay(inhaleMs)
+
+                            status = "Expiră  ████████████"
+                            HapticManager.vibrateDuration(this@MainActivity, exhaleMs)
+                            delay(exhaleMs)
+                        }
+
+                        status = "Gata? ✓"
+                        sendAction("focus_ready")
+                    }
+                }
+
+                "focus_started" -> {
+                    isFocusActive = true
+                    focusReport = null
+                    status = "Focus pornit"
+                    enableDnd()
+                    startFocusTimer()
+                }
+
+                "focus_exit" -> {
+                    HapticManager.vibrate(this, HapticPattern.FOCUS_EXIT)
+                    exitsCount = json.get("exits_count")?.asInt
+                    status = "Ai ieșit din focus. Exits: ${exitsCount ?: 0}"
+                }
+
+                "focus_complete", "focus_end" -> {
+                    isFocusActive = false
+                    stopFocusTimer()
+                    disableDnd()
+                    focusReport = json
+                    status = "Focus finalizat"
+                }
+
+                "hyperfocus_alert" -> {
+                    HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
+
+                    val message = json.get("message")?.asString ?: "Pauză recomandată"
+
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                    status = message
+                }
+
+                "medication_reminder" -> {
+                    HapticManager.vibrate(this, HapticPattern.MEDICATION)
+                    showMedicationDialog = true
+                    status = "Reminder medicație"
+                }
+
+                else -> {
+                    status = "State necunoscut: $state"
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e("WS_HEALTH", "Invalid server JSON: $text", e)
+            wsStatus = "Server JSON invalid"
+        }
+    }
+
+    private fun sendAction(action: String, extra: Map<String, Any> = emptyMap()) {
+        if (!isWsConnected || webSocket == null) {
+            Log.d("WS_ACTION", "Skip action: websocket not connected")
+            return
+        }
+
+        val payload = mutableMapOf<String, Any>(
+            "action" to action,
+            "timestamp" to System.currentTimeMillis()
+        )
+
+        payload.putAll(extra)
+
+        val json = gson.toJson(payload)
+        val sent = webSocket?.send(json) ?: false
+
+        Log.d("WS_ACTION", "Sent action: $json, success=$sent")
+
+        wsStatus = if (sent) {
+            "Action trimisă: $action"
+        } else {
+            "Action failed: $action"
+        }
+    }
+
+    private fun startFocusSession() {
+        sendAction("focus_start")
+    }
+
+    private fun endFocusSession() {
+        sendAction("focus_end")
+        isFocusActive = false
+        stopFocusTimer()
+        disableDnd()
+    }
+
+    private fun startFocusTimer() {
+        focusTimerJob?.cancel()
+        focusSeconds = 0
+
+        focusTimerJob = lifecycleScope.launch {
+            while (isActive && isFocusActive) {
+                delay(1000)
+                focusSeconds++
+            }
+        }
+    }
+
+    private fun stopFocusTimer() {
+        focusTimerJob?.cancel()
+        focusTimerJob = null
+    }
+
+    private fun enableDnd() {
+        val notificationManager =
+            getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+        if (notificationManager.isNotificationPolicyAccessGranted) {
+            notificationManager.setInterruptionFilter(
+                NotificationManager.INTERRUPTION_FILTER_NONE
+            )
+        } else {
+            Toast.makeText(
+                this,
+                "Activează Notification Policy Access pentru DND",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun disableDnd() {
+        val notificationManager =
+            getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+        if (notificationManager.isNotificationPolicyAccessGranted) {
+            notificationManager.setInterruptionFilter(
+                NotificationManager.INTERRUPTION_FILTER_ALL
+            )
+        }
+    }
+
     private fun startSendingLoop() {
         if (sendingJob != null) return
 
@@ -248,11 +424,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         sendingJob?.cancel()
         sendingJob = null
     }
-
-    // TODO: Adaugă fun sendAction(action: String, extra: Map<String,Any> = emptyMap())
-    //       care trimite {"action": action, ...extra} via webSocket?.send(gson.toJson(...))
-    // TODO: Adaugă fun startFocusSession() → sendAction("focus_start")
-    // TODO: Adaugă fun endFocusSession()   → sendAction("focus_end")
 
     private fun sendHealthData() {
         if (!isWsConnected || webSocket == null) {
@@ -276,7 +447,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         Log.d("WS_HEALTH", "Sending: $json")
 
         runOnUiThread {
-            wsStatus = if (sent) "WebSocket: date trimise" else "WebSocket: send failed"
+            wsStatus = if (sent) {
+                "WebSocket: date trimise"
+            } else {
+                "WebSocket: send failed"
+            }
         }
     }
 
@@ -480,43 +655,153 @@ fun HealthScreen(
     activityState: String?,
     accelerometer: List<Float>?,
     gyroscope: List<Float>?,
-    light: Float?
+    light: Float?,
+    isFocusActive: Boolean,
+    focusSeconds: Int,
+    focusReport: JsonObject?,
+    exitsCount: Int?,
+    showMedicationDialog: Boolean,
+    onStartFocus: () -> Unit,
+    onStopFocus: () -> Unit,
+    onMedicationTaken: () -> Unit,
+    onMedicationSkipped: () -> Unit
 ) {
     Scaffold(
         timeText = { TimeText() }
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 10.dp, vertical = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("ML Sensor Stream", style = MaterialTheme.typography.title3, color = Color.White)
-            Spacer(modifier = Modifier.height(6.dp))
-            // TODO: Adaugă buton "Start Focus" care apelează startFocusSession()
-            //       și "Stop Focus" când sesiunea e activă → endFocusSession()
-            // TODO: Adaugă ecran FocusSessionScreen cu timer + raport calitate la final
-            // TODO: Adaugă ecran MedicationScreen pentru setarea orelor reminder
-            //       → POST /medication/schedule cu lista de ore
-            // TODO: Adaugă ecran ReportScreen → GET /report/daily afișat la cerere
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "ML Sensor Stream",
+                    style = MaterialTheme.typography.title3,
+                    color = Color.White
+                )
 
-            MetricLine("status", status)
-            MetricLine("ws", wsStatus)
-            MetricLine("heart_rate", heartRate?.toString() ?: "N/A")
-            MetricLine("activity", activityState ?: "N/A")
-            MetricLine("light", light?.toString() ?: "N/A")
-            MetricLine("accelerometer", accelerometer?.joinToString() ?: "N/A")
-            MetricLine("gyroscope", gyroscope?.joinToString() ?: "N/A")
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    onClick = {
+                        if (isFocusActive) {
+                            onStopFocus()
+                        } else {
+                            onStartFocus()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isFocusActive) "Stop Focus" else "Start Focus")
+                }
+
+                if (isFocusActive) {
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "Focus: ${focusSeconds / 60}:${
+                            (focusSeconds % 60).toString().padStart(2, '0')
+                        }",
+                        color = Color.Cyan,
+                        style = MaterialTheme.typography.title2
+                    )
+                }
+
+                exitsCount?.let {
+                    MetricLine("focus_exits", it.toString())
+                }
+
+                focusReport?.let { report ->
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        "Raport focus",
+                        color = Color.White,
+                        style = MaterialTheme.typography.title3
+                    )
+
+                    MetricLine(
+                        "duration_minutes",
+                        report.get("duration_minutes")?.asString ?: "N/A"
+                    )
+
+                    MetricLine(
+                        "quality_percent",
+                        report.get("quality_percent")?.asString ?: "N/A"
+                    )
+
+                    MetricLine(
+                        "exits_count",
+                        report.get("exits_count")?.asString ?: "N/A"
+                    )
+
+                    MetricLine(
+                        "acc_stability_percent",
+                        report.get("acc_stability_percent")?.asString ?: "N/A"
+                    )
+
+                    MetricLine(
+                        "hr_variability",
+                        report.get("hr_variability")?.asString ?: "N/A"
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                MetricLine("status", status)
+                MetricLine("ws", wsStatus)
+                MetricLine("heart_rate", heartRate?.toString() ?: "N/A")
+                MetricLine("activity", activityState ?: "N/A")
+                MetricLine("light", light?.toString() ?: "N/A")
+                MetricLine("accelerometer", accelerometer?.joinToString() ?: "N/A")
+                MetricLine("gyroscope", gyroscope?.joinToString() ?: "N/A")
+            }
+
+            if (showMedicationDialog) {
+                Alert(
+                    title = {
+                        Text("Medicație?")
+                    },
+                    positiveButton = {
+                        Button(onClick = onMedicationTaken) {
+                            Text("✓")
+                        }
+                    },
+                    negativeButton = {
+                        Button(onClick = onMedicationSkipped) {
+                            Text("✗")
+                        }
+                    }
+                )
+            }
         }
     }
 }
 
 @Composable
 fun MetricLine(name: String, value: String) {
-    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-        Text(text = name, style = MaterialTheme.typography.caption2, color = Color.White)
-        Text(text = value, style = MaterialTheme.typography.caption1, color = Color.Green)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.caption2,
+            color = Color.White
+        )
+
+        Text(
+            text = value,
+            style = MaterialTheme.typography.caption1,
+            color = Color.Green
+        )
     }
 }

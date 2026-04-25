@@ -14,31 +14,36 @@ class ADHDCondition(HealthCondition):
         if stats.sample_count < 5:
             return {"state": "insufficient_data", "confidence": 0}
 
-        lin_var  = stats.linear_acc_variance
+        lin_var = stats.linear_acc_variance
         gyro_avg = stats.gyro_mean
         gyro_var = stats.gyro_variance
 
-        # Mers sau mișcare mare → nu fidgeting
-        if lin_var > 1.0:
-            return {"state": "normal", "confidence": 0.85, "message": "Mers detectat"}
+        raw = raw_data.get("raw_sensors", raw_data)
+        acc = raw.get("accelerometer", [0, 0, 9.8])
 
-        is_small_movement = 0.05 < lin_var < 0.5
-        is_wrist_moving   = gyro_avg > 0.2
-        is_repetitive     = gyro_var < 0.3   # mișcare regulată, nu aleatoare
+        # Dacă accelerometrul are variație mare și giroscopul e mare,
+        # e mișcare activă de mână, nu neapărat mers.
+        is_hand_agitated = (
+            lin_var > 5.0 and
+            gyro_avg > 0.8
+        )
 
-        if not (is_small_movement and is_wrist_moving and is_repetitive):
-            return {"state": "normal", "confidence": 0.9, "message": "Comportament stabil"}
+        # Fidgeting clasic: mișcare mică, repetitivă.
+        is_small_fidgeting = (
+            0.05 < lin_var < 7.0 and
+            0.25 < gyro_avg < 1.2 and
+            gyro_var < 0.4
+        )
 
-        severity = min(1.0, lin_var / 0.5)
+        # Mișcare puternică/dezorganizată de mână.
+        is_strong_restlessness = (
+            lin_var >= 5.0 and
+            gyro_avg > 1.0
+        )
 
-        if severity < 0.3:
-            return {
-                "state": "adhd_fidgeting_mild",
-                "severity": round(severity, 2),
-                "confidence": 0.7,
-                "message": "Fidgeting ușor",
-            }
-        elif severity < 0.6:
+        if is_small_fidgeting:
+            severity = min(1.0, lin_var / 5.0)
+
             return {
                 "state": "adhd_fidgeting",
                 "action": "vibrate_anchor",
@@ -46,15 +51,23 @@ class ADHDCondition(HealthCondition):
                 "confidence": 0.8,
                 "message": "Fidgeting detectat",
             }
-        else:
+
+        if is_strong_restlessness:
+            severity = min(1.0, (lin_var / 10.0 + gyro_avg / 5.0) / 2)
+
             return {
-                "state": "adhd_fidgeting_strong",
+                "state": "adhd_high_activity",
                 "action": "vibrate_anchor",
                 "severity": round(severity, 2),
-                "confidence": 0.85,
-                "message": "Un singur lucru acum 🎯",
+                "confidence": 0.75,
+                "message": "Mișcare agitată a mâinii detectată",
             }
 
+        return {
+            "state": "normal",
+            "confidence": 0.9,
+            "message": "Comportament stabil"
+        }
 
 class EpilepsyCondition(HealthCondition):
     def __init__(self):
