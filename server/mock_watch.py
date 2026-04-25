@@ -27,22 +27,34 @@ async def simulate_watch():
         async with websockets.connect(uri) as websocket:
             print("--- START TEST 10Hz ---")
 
-            print("\n>>> Faza 1: NORMAL (Așteaptă 10s...)")
-            for _ in range(100): # 100 pachete * 0.1s = 10 secunde
+            print("\n>>> Faza 1: NORMAL (10s)")
+            for _ in range(100):
                 await send_payload(websocket, "NORMAL", 72, [0.1, -6.0, 9.8], 300)
                 await asyncio.sleep(0.1)
 
-            print("\n>>> Faza 2: ADHD (Agitație X/Z)")
+            print("\n>>> Faza 2: ADHD (Agitatie X/Z)")
             for _ in range(100):
                 accel_adhd = [random.uniform(-10.0, 10.0), -6.0, random.uniform(5.0, 15.0)]
                 await send_payload(websocket, "ADHD", 95, accel_adhd, 300)
                 await asyncio.sleep(0.1)
 
-            print("\n>>> Faza 3: EPILEPSIE (Lumină rapidă)")
+            # Faza intermediara: puls crescut + palpaire usoara de lumina (pre-ictal)
+            print("\n>>> Faza 2.5: PRE-CRITICA (Puls crescut + lumina inconsistenta)")
+            for i in range(50):
+                # Palpaiere lenta ~1.25 Hz — sub zona periculoasa, dar HR creste
+                light_pre = 300 + (180 if i % 8 < 4 else 0)
+                hr_rising = int(88 + i * 0.24)  # 88 -> 100 bpm
+                accel_pre = [random.uniform(-1.5, 1.5), -6.0, random.uniform(8.5, 11.5)]
+                await send_payload(websocket, "PRE-CRITICA", hr_rising, accel_pre, light_pre)
+                await asyncio.sleep(0.1)
+
+            # Faza 3: stroboscop la 5 Hz (zona periculoasa 3-30 Hz) + convulsii
+            print("\n>>> Faza 3: EPILEPSIE (Stroboscop 5 Hz + convulsii)")
             for i in range(100):
-                light_strobe = 2000 if i % 4 < 2 else 100 # Schimbă lumina la fiecare 0.2s
-                accel_seizure = [random.uniform(-2.0, 2.0), -6.0, random.uniform(12.0, 18.0)]
-                await send_payload(websocket, "EPILEPSY", 120, accel_seizure, light_strobe)
+                # Alternare fiecare pachet (0.1s) => perioada 0.2s => 5 Hz
+                light_strobe = 2000 if i % 2 == 0 else 50
+                accel_seizure = [random.uniform(-3.0, 3.0), -6.0, random.uniform(11.0, 19.0)]
+                await send_payload(websocket, "EPILEPSIE", 125, accel_seizure, light_strobe)
                 await asyncio.sleep(0.1)
 
     except Exception as e:

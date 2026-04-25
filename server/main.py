@@ -8,7 +8,7 @@ from datetime import datetime
 app = FastAPI()
 brain = DecisionBrain()
 # Analizăm ultimele 10 secunde la fiecare 1 secundă
-processor = DataStreamProcessor(brain, window_duration=10, process_interval=5)
+processor = DataStreamProcessor(brain, window_duration=20, process_interval=5)
 
 @app.websocket("/ws/health")
 async def health_ws(websocket: WebSocket):
@@ -32,6 +32,10 @@ async def health_ws(websocket: WebSocket):
                 print(f" DECIZIE | {datetime.now().strftime('%H:%M:%S')}")
                 print(f" STARE: {analysis_result['state'].upper()}")
                 print(f" MESAJ: {analysis_result['message']}")
+                if "strobe_freq_hz" in analysis_result:
+                    print(f" STROBOSCOP: {analysis_result['strobe_freq_hz']} Hz"
+                          f" | Amplitudine: {analysis_result['light_amplitude_lux']} lux"
+                          f" | HR mediu: {analysis_result['avg_heart_rate']} bpm")
                 print(f" PACHETE IN BUFFER: {len(processor.buffer)}")
                 print("="*40)
                 
