@@ -2,6 +2,33 @@ import time
 import math
 
 
+class EpilepsyWindowBuffer:
+    """Rolling 20-second window of raw sensor readings for epilepsy analysis."""
+    WINDOW_SECONDS = 20.0
+
+    def __init__(self):
+        self._samples = []  # (wall_time, light, accel_z, heart_rate)
+
+    def add(self, light: float, accel_z: float, heart_rate: float):
+        now = time.time()
+        self._samples.append((now, light, accel_z, heart_rate))
+        cutoff = now - self.WINDOW_SECONDS
+        self._samples = [s for s in self._samples if s[0] >= cutoff]
+
+    @property
+    def count(self) -> int:
+        return len(self._samples)
+
+    @property
+    def duration(self) -> float:
+        if len(self._samples) < 2:
+            return 0.0
+        return self._samples[-1][0] - self._samples[0][0]
+
+    def get_window(self):
+        return list(self._samples)
+
+
 class StreamingStats:
     """
     Statistici EMA (Exponential Moving Average) cu alpha time-adaptive.
@@ -180,11 +207,13 @@ class DataStreamProcessor:
     def __init__(self, brain):
         self.brain = brain
         self.stats = StreamingStats()
+        self.epilepsy_buffer = EpilepsyWindowBuffer()
         self._start_time = time.time()
         self._last_verdict = None
 
     def add_data(self, data):
         self.stats.update(data)
+        self._buffer_epilepsy(data)
 
         now = time.time()
         elapsed = now - self._start_time
@@ -197,6 +226,34 @@ class DataStreamProcessor:
             now - self._last_verdict >= self.VERDICT_SECONDS
         ):
             self._last_verdict = now
-            return self.brain.process_stats(self.stats, data)
+            enriched = dict(data)
+            enriched["_epilepsy_window"] = self.epilepsy_buffer.get_window()
+            return self.brain.process_stats(self.stats, enriched)
 
         return None
+
+    def _buffer_epilepsy(self, data):
+        raw = data.get("raw_sensors", data)
+        hs = data.get("health_services", data)
+
+        light_raw = raw.get("light") or data.get("light") or [0.0]
+        if isinstance(light_raw, list):
+            light = float(light_raw[0]) if light_raw else 0.0
+        else:
+            try:
+                light = float(light_raw)
+            except Exception:
+                light = 0.0
+
+        acc = raw.get("accelerometer") or data.get("accelerometer") or [0.0, 0.0, 9.8]
+        try:
+            accel_z = float(acc[2]) if isinstance(acc, list) and len(acc) >= 3 else 9.8
+        except Exception:
+            accel_z = 9.8
+
+        try:
+            hr = float(hs.get("heart_rate") or data.get("heart_rate") or 0.0)
+        except Exception:
+            hr = 0.0
+
+        self.epilepsy_buffer.add(light, accel_z, hr)

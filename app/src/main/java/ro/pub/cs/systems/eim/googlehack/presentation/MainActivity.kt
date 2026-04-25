@@ -10,8 +10,14 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.net.Uri
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
+import android.telephony.SmsManager
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -49,7 +55,8 @@ import java.util.concurrent.TimeUnit
 class MainActivity : ComponentActivity(), SensorEventListener {
 
     private val HR_PERMISSION = "android.permission.health.READ_HEART_RATE"
-    private val SERVER_URL = "ws://10.200.22.124:8000/ws/health"
+    private val SERVER_URL = "ws://10.200.21.62:8000/ws/health"
+    private val EMERGENCY_PHONE = "+40728151136"
 
     private val gson = Gson()
 
@@ -88,6 +95,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var breathingStep by mutableStateOf(1)
     private var breathingTotal by mutableStateOf(3)
 
+    private var emergencyTriggered = false
+    private var consecutiveEpilepsyAlerts = 0
+    private var lastLocation: Location? = null
+    private lateinit var locationManager: LocationManager
+    private val locationListener = LocationListener { location -> lastLocation = location }
+
     private val passiveClient by lazy {
         HealthServices.getClient(this).passiveMonitoringClient
     }
@@ -115,6 +128,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         super.onCreate(savedInstanceState)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
         setContent {
             MaterialTheme {
@@ -160,6 +174,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         connectWebSocket()
         startAndroidSensors()
         startSendingLoop()
+        startLocationUpdates()
 
         if (hasPermissions()) {
             startPassiveMonitoring()
@@ -171,6 +186,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         stopSendingLoop()
         stopPassiveMonitoring()
         stopAndroidSensors()
+        stopLocationUpdates()
         disconnectWebSocket()
     }
 
@@ -341,14 +357,35 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     status = "Reminder medicație"
                 }
 
+                "epilepsy_preictal" -> {
+                    HapticManager.vibrate(this, HapticPattern.MEDICATION)
+                    status = json.get("message")?.asString ?: "Stare pre-ictală detectată"
+                }
+
+                "epilepsy_warning" -> {
+                    HapticManager.vibrate(this, HapticPattern.MEDICATION)
+                    status = json.get("message")?.asString ?: "Avertisment: lumină stroboscopică"
+                }
+
                 "epilepsy_alert" -> {
                     HapticManager.vibrate(this, HapticPattern.MEDICATION)
-                    status = json.get("message")?.asString ?: "Alertă lumină"
+                    val freq = json.get("freq")?.asDouble ?: 0.0
+                    status = json.get("message")?.asString ?: "ALERTĂ EPILEPSIE ${freq} Hz"
+                    consecutiveEpilepsyAlerts++
+                    if (consecutiveEpilepsyAlerts >= 2) {
+                        triggerEmergency(freq)
+                    }
                 }
 
                 "anxiety_alert" -> {
                     HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
                     status = json.get("message")?.asString ?: "Puls ridicat"
+                }
+
+                "normal" -> {
+                    consecutiveEpilepsyAlerts = 0
+                    emergencyTriggered = false
+                    status = json.get("message")?.asString ?: "Totul este în regulă"
                 }
 
                 else -> {
@@ -434,6 +471,73 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             notificationManager.setInterruptionFilter(
                 NotificationManager.INTERRUPTION_FILTER_ALL
             )
+        }
+    }
+
+    private fun startLocationUpdates() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) return
+
+        for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            try {
+                locationManager.requestLocationUpdates(provider, 30_000L, 10f, locationListener)
+                locationManager.getLastKnownLocation(provider)?.let { lastLocation = it }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun stopLocationUpdates() {
+        try { locationManager.removeUpdates(locationListener) } catch (_: Exception) {}
+    }
+
+    private fun triggerEmergency(freq: Double) {
+        if (emergencyTriggered) return
+        emergencyTriggered = true
+
+        lifecycleScope.launch {
+            delay(30_000L)
+            val lat = lastLocation?.latitude ?: 0.0
+            val lon = lastLocation?.longitude ?: 0.0
+            sendEmergencySms(EMERGENCY_PHONE, freq, lat, lon)
+            makeEmergencyCall(EMERGENCY_PHONE)
+        }
+    }
+
+    private fun sendEmergencySms(phone: String, freq: Double, lat: Double, lon: Double) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w("EMERGENCY", "SMS permission not granted")
+            return
+        }
+        val mapsUrl = "maps.google.com/?q=%.6f,%.6f".format(lat, lon)
+        val message = "ALERTA: CRIZA EPILEPTICA | %.1f Hz. GPS: %.2f,%.2f. %s"
+            .format(freq, lat, lon, mapsUrl)
+        try {
+            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                getSystemService(SmsManager::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                SmsManager.getDefault()
+            }
+            smsManager?.sendTextMessage(phone, null, message, null, null)
+            Log.d("EMERGENCY", "SMS sent: $message")
+        } catch (e: Exception) {
+            Log.e("EMERGENCY", "SMS failed", e)
+        }
+    }
+
+    private fun makeEmergencyCall(phone: String) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w("EMERGENCY", "CALL_PHONE permission not granted")
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phone"))
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e("EMERGENCY", "Call failed", e)
         }
     }
 
@@ -529,7 +633,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             arrayOf(
                 Manifest.permission.ACTIVITY_RECOGNITION,
                 Manifest.permission.BODY_SENSORS,
-                HR_PERMISSION
+                HR_PERMISSION,
+                Manifest.permission.SEND_SMS,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.ACCESS_FINE_LOCATION
             ),
             200
         )
