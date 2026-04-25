@@ -6,30 +6,31 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.hardware.*
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.BatteryManager
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.health.services.client.HealthServices
 import androidx.health.services.client.PassiveListenerCallback
-import androidx.health.services.client.data.*
+import androidx.health.services.client.data.DataPointContainer
+import androidx.health.services.client.data.DataType
+import androidx.health.services.client.data.IntervalDataPoint
+import androidx.health.services.client.data.PassiveListenerConfig
+import androidx.health.services.client.data.SampleDataPoint
+import androidx.health.services.client.data.UserActivityInfo
 import androidx.lifecycle.lifecycleScope
-import androidx.wear.compose.material.*
-import androidx.wear.compose.material.dialog.Alert
+import androidx.wear.compose.material.MaterialTheme
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -38,13 +39,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import okhttp3.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
-
-data class HealthMetric(
-    val name: String,
-    val value: String = "N/A"
-)
 
 class MainActivity : ComponentActivity(), SensorEventListener {
 
@@ -83,6 +83,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var showMedicationDialog by mutableStateOf(false)
     private var exitsCount by mutableStateOf<Int?>(null)
 
+    private var isBreathingActive by mutableStateOf(false)
+    private var breathingPhase by mutableStateOf("Inhale")
+    private var breathingStep by mutableStateOf(1)
+    private var breathingTotal by mutableStateOf(3)
+
     private val passiveClient by lazy {
         HealthServices.getClient(this).passiveMonitoringClient
     }
@@ -113,19 +118,19 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         setContent {
             MaterialTheme {
-                HealthScreen(
+                WatchApp(
                     status = status,
                     wsStatus = wsStatus,
                     heartRate = heartRate,
-                    activityState = activityState,
-                    accelerometer = accelerometer,
-                    gyroscope = gyroscope,
-                    light = light,
                     isFocusActive = isFocusActive,
                     focusSeconds = focusSeconds,
                     focusReport = focusReport,
                     exitsCount = exitsCount,
                     showMedicationDialog = showMedicationDialog,
+                    isBreathingActive = isBreathingActive,
+                    breathingPhase = breathingPhase,
+                    breathingStep = breathingStep,
+                    breathingTotal = breathingTotal,
                     onStartFocus = { startFocusSession() },
                     onStopFocus = { endFocusSession() },
                     onMedicationTaken = {
@@ -152,7 +157,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-
         connectWebSocket()
         startAndroidSensors()
         startSendingLoop()
@@ -164,7 +168,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onPause() {
         super.onPause()
-
         stopSendingLoop()
         stopPassiveMonitoring()
         stopAndroidSensors()
@@ -197,8 +200,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     isWsConnected = true
                     this@MainActivity.webSocket = webSocket
 
-                    Log.d("WS_HEALTH", "Connected to $SERVER_URL")
-
                     runOnUiThread {
                         wsStatus = "WebSocket: conectat"
                     }
@@ -223,7 +224,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     Log.e("WS_HEALTH", "WebSocket error: ${t.message}", t)
 
                     runOnUiThread {
-                        wsStatus = "WebSocket: eroare (${t.message})"
+                        wsStatus = "WebSocket: eroare"
+                        status = "Server indisponibil"
                     }
                 }
 
@@ -249,14 +251,20 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun handleServerMessage(text: String) {
         try {
             val json = JsonParser.parseString(text).asJsonObject
+
+            if (json.has("status") && !json.has("state")) {
+                wsStatus = "Server: ${json.get("status").asString}"
+                return
+            }
+
             val state = json.get("state")?.asString ?: return
 
             wsStatus = "Server state: $state"
 
             when (state) {
-                "adhd_high_activity" -> {
+                "adhd_high_activity", "adhd_fidgeting" -> {
                     HapticManager.vibrate(this, HapticPattern.ANCHOR)
-                    status = "Activitate ridicată detectată"
+                    status = json.get("message")?.asString ?: "Fidgeting detectat"
                 }
 
                 "pre_focus_ritual" -> {
@@ -264,23 +272,40 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     val inhaleMs = json.get("inhale_ms")?.asLong ?: 5000L
                     val exhaleMs = json.get("exhale_ms")?.asLong ?: 5000L
 
+                    isBreathingActive = true
+                    breathingTotal = breaths
+                    breathingStep = 1
+                    breathingPhase = "Inhale"
+                    focusReport = null
+                    status = "Pregătire focus"
+
                     lifecycleScope.launch {
-                        repeat(breaths) {
-                            status = "Inspiră ████████████"
+                        repeat(breaths) { index ->
+                            breathingStep = index + 1
+
+                            breathingPhase = "Inhale"
+                            status = "Inspiră"
                             HapticManager.vibrateDuration(this@MainActivity, inhaleMs)
                             delay(inhaleMs)
 
-                            status = "Expiră  ████████████"
+                            breathingPhase = "Exhale"
+                            status = "Expiră"
                             HapticManager.vibrateDuration(this@MainActivity, exhaleMs)
                             delay(exhaleMs)
                         }
 
-                        status = "Gata? ✓"
+                        breathingPhase = "Ready"
+                        status = "Focus ready"
+
+                        delay(800)
+
+                        isBreathingActive = false
                         sendAction("focus_ready")
                     }
                 }
 
                 "focus_started" -> {
+                    isBreathingActive = false
                     isFocusActive = true
                     focusReport = null
                     status = "Focus pornit"
@@ -291,10 +316,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 "focus_exit" -> {
                     HapticManager.vibrate(this, HapticPattern.FOCUS_EXIT)
                     exitsCount = json.get("exits_count")?.asInt
-                    status = "Ai ieșit din focus. Exits: ${exitsCount ?: 0}"
+                    status = "Ai ieșit din focus"
                 }
 
                 "focus_complete", "focus_end" -> {
+                    isBreathingActive = false
                     isFocusActive = false
                     stopFocusTimer()
                     disableDnd()
@@ -304,9 +330,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                 "hyperfocus_alert" -> {
                     HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
-
                     val message = json.get("message")?.asString ?: "Pauză recomandată"
-
                     Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                     status = message
                 }
@@ -317,8 +341,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     status = "Reminder medicație"
                 }
 
+                "epilepsy_alert" -> {
+                    HapticManager.vibrate(this, HapticPattern.MEDICATION)
+                    status = json.get("message")?.asString ?: "Alertă lumină"
+                }
+
+                "anxiety_alert" -> {
+                    HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
+                    status = json.get("message")?.asString ?: "Puls ridicat"
+                }
+
                 else -> {
-                    status = "State necunoscut: $state"
+                    status = json.get("message")?.asString ?: "Totul este în regulă"
                 }
             }
 
@@ -331,6 +365,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun sendAction(action: String, extra: Map<String, Any> = emptyMap()) {
         if (!isWsConnected || webSocket == null) {
             Log.d("WS_ACTION", "Skip action: websocket not connected")
+            status = "Ceas neconectat la server"
             return
         }
 
@@ -343,8 +378,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         val json = gson.toJson(payload)
         val sent = webSocket?.send(json) ?: false
-
-        Log.d("WS_ACTION", "Sent action: $json, success=$sent")
 
         wsStatus = if (sent) {
             "Action trimisă: $action"
@@ -359,6 +392,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun endFocusSession() {
         sendAction("focus_end")
+        isBreathingActive = false
         isFocusActive = false
         stopFocusTimer()
         disableDnd()
@@ -389,12 +423,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             notificationManager.setInterruptionFilter(
                 NotificationManager.INTERRUPTION_FILTER_NONE
             )
-        } else {
-            Toast.makeText(
-                this,
-                "Activează Notification Policy Access pentru DND",
-                Toast.LENGTH_LONG
-            ).show()
         }
     }
 
@@ -413,7 +441,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (sendingJob != null) return
 
         sendingJob = lifecycleScope.launch {
-            while (true) {
+            while (isActive) {
                 sendHealthData()
                 delay(1000)
             }
@@ -426,33 +454,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun sendHealthData() {
-        if (!isWsConnected || webSocket == null) {
-            Log.d("WS_HEALTH", "Skip send: websocket not connected")
-            return
-        }
+        if (!isWsConnected || webSocket == null) return
 
         val payload = mapOf(
-            "heart_rate" to heartRate,
-            "accelerometer" to accelerometer,
-            "gyroscope" to gyroscope,
-            "light" to light,
-            "activity_state" to activityState,
+            "health_services" to mapOf(
+                "heart_rate" to heartRate,
+                "activity_state" to activityState
+            ),
+            "raw_sensors" to mapOf(
+                "accelerometer" to accelerometer,
+                "gyroscope" to gyroscope,
+                "linear_acceleration" to accelerometer,
+                "light" to listOf(light ?: 0f)
+            ),
             "battery" to getBatteryPayload(),
             "timestamp" to System.currentTimeMillis()
         )
 
         val json = gson.toJson(payload)
-        val sent = webSocket?.send(json) ?: false
-
-        Log.d("WS_HEALTH", "Sending: $json")
-
-        runOnUiThread {
-            wsStatus = if (sent) {
-                "WebSocket: date trimise"
-            } else {
-                "WebSocket: send failed"
-            }
-        }
+        webSocket?.send(json)
     }
 
     private fun getBatteryPayload(): Map<String, Any?> {
@@ -544,7 +564,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 val supportedTypes = passiveDataTypes.filter { it in supported }.toSet()
 
                 if (supportedTypes.isEmpty()) {
-                    status = "Heart rate pasiv nesuportat"
+                    status = "Heart rate nesuportat"
                     return@launch
                 }
 
@@ -645,163 +665,4 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-}
-
-@Composable
-fun HealthScreen(
-    status: String,
-    wsStatus: String,
-    heartRate: Double?,
-    activityState: String?,
-    accelerometer: List<Float>?,
-    gyroscope: List<Float>?,
-    light: Float?,
-    isFocusActive: Boolean,
-    focusSeconds: Int,
-    focusReport: JsonObject?,
-    exitsCount: Int?,
-    showMedicationDialog: Boolean,
-    onStartFocus: () -> Unit,
-    onStopFocus: () -> Unit,
-    onMedicationTaken: () -> Unit,
-    onMedicationSkipped: () -> Unit
-) {
-    Scaffold(
-        timeText = { TimeText() }
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    "ML Sensor Stream",
-                    style = MaterialTheme.typography.title3,
-                    color = Color.White
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Button(
-                    onClick = {
-                        if (isFocusActive) {
-                            onStopFocus()
-                        } else {
-                            onStartFocus()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (isFocusActive) "Stop Focus" else "Start Focus")
-                }
-
-                if (isFocusActive) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text = "Focus: ${focusSeconds / 60}:${
-                            (focusSeconds % 60).toString().padStart(2, '0')
-                        }",
-                        color = Color.Cyan,
-                        style = MaterialTheme.typography.title2
-                    )
-                }
-
-                exitsCount?.let {
-                    MetricLine("focus_exits", it.toString())
-                }
-
-                focusReport?.let { report ->
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        "Raport focus",
-                        color = Color.White,
-                        style = MaterialTheme.typography.title3
-                    )
-
-                    MetricLine(
-                        "duration_minutes",
-                        report.get("duration_minutes")?.asString ?: "N/A"
-                    )
-
-                    MetricLine(
-                        "quality_percent",
-                        report.get("quality_percent")?.asString ?: "N/A"
-                    )
-
-                    MetricLine(
-                        "exits_count",
-                        report.get("exits_count")?.asString ?: "N/A"
-                    )
-
-                    MetricLine(
-                        "acc_stability_percent",
-                        report.get("acc_stability_percent")?.asString ?: "N/A"
-                    )
-
-                    MetricLine(
-                        "hr_variability",
-                        report.get("hr_variability")?.asString ?: "N/A"
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                MetricLine("status", status)
-                MetricLine("ws", wsStatus)
-                MetricLine("heart_rate", heartRate?.toString() ?: "N/A")
-                MetricLine("activity", activityState ?: "N/A")
-                MetricLine("light", light?.toString() ?: "N/A")
-                MetricLine("accelerometer", accelerometer?.joinToString() ?: "N/A")
-                MetricLine("gyroscope", gyroscope?.joinToString() ?: "N/A")
-            }
-
-            if (showMedicationDialog) {
-                Alert(
-                    title = {
-                        Text("Medicație?")
-                    },
-                    positiveButton = {
-                        Button(onClick = onMedicationTaken) {
-                            Text("✓")
-                        }
-                    },
-                    negativeButton = {
-                        Button(onClick = onMedicationSkipped) {
-                            Text("✗")
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun MetricLine(name: String, value: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 6.dp)
-    ) {
-        Text(
-            text = name,
-            style = MaterialTheme.typography.caption2,
-            color = Color.White
-        )
-
-        Text(
-            text = value,
-            style = MaterialTheme.typography.caption1,
-            color = Color.Green
-        )
-    }
 }
