@@ -57,4 +57,6 @@ dependencies {
     debugImplementation(libs.ui.test.manifest)
     implementation("androidx.health:health-services-client:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.10.1")
 }
