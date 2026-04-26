@@ -10,9 +10,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Geocoder
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
@@ -21,9 +24,11 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.telephony.PhoneStateListener
 import android.telephony.SmsManager
+import android.telephony.TelephonyManager
 import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
@@ -44,11 +49,13 @@ import androidx.wear.compose.material.MaterialTheme
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -61,10 +68,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private val HR_PERMISSION = "android.permission.health.READ_HEART_RATE"
 
-    // Schimbă IP-ul/portul dacă ai pornit serverul pe alt port.
+    // Schimbă IP-ul dacă serverul rulează pe alt device/IP.
     private val SERVER_URL = "ws://10.200.22.124:8000/ws/health"
 
     private val EMERGENCY_PHONE = "+40728151136"
+    private val EMERGENCY_TTS_REPEATS = 3
+
+    private val STRESS_POLL_MS = 10_000L
+    private val STRESS_COOLDOWN_MS = 90_000L
+    private val STRESS_THRESHOLD = 0.55f
 
     private val gson = Gson()
 
@@ -98,13 +110,19 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var showMedicationDialog by mutableStateOf(false)
     private var exitsCount by mutableStateOf<Int?>(null)
 
+    private var alertTitle by mutableStateOf<String?>(null)
+    private var alertBody by mutableStateOf("")
+    private var alertDismissJob: Job? = null
+
+    private var selectedProfile by mutableStateOf<String?>(null)
+
     private var isBreathingActive by mutableStateOf(false)
     private var breathingPhase by mutableStateOf("Inhale")
     private var breathingStep by mutableStateOf(1)
     private var breathingTotal by mutableStateOf(3)
 
     // ──────────────────────────────────────────────
-    // Anxiety / grounding check-in state
+    // Anxiety / grounding vocal
     // ──────────────────────────────────────────────
 
     private var isCheckInActive by mutableStateOf(false)
@@ -117,9 +135,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var lastTranscript by mutableStateOf<String?>(null)
     private var speechRecognizer: SpeechRecognizer? = null
 
-    private var tts: TextToSpeech? = null
-    private var isTtsReady = false
-
     // ──────────────────────────────────────────────
     // Emergency / location
     // ──────────────────────────────────────────────
@@ -131,6 +146,54 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val locationListener = LocationListener { location ->
         lastLocation = location
     }
+
+    // ──────────────────────────────────────────────
+    // Local stress model
+    // ──────────────────────────────────────────────
+
+//    private lateinit var stressPredictor: StressPredictor
+    private var stressJob: Job? = null
+    private var lastStressAlertAt = 0L
+
+    // ──────────────────────────────────────────────
+    // TTS + emergency call audio
+    // ──────────────────────────────────────────────
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var ttsMessageSpoken = false
+    private var ttsRepeatCount = 0
+
+    private lateinit var telephonyManager: TelephonyManager
+    private lateinit var audioManager: AudioManager
+    private var previousSpeakerphoneOn = false
+
+    @Suppress("DEPRECATION")
+    private val phoneStateListener = object : PhoneStateListener() {
+        override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+            if (
+                state == TelephonyManager.CALL_STATE_OFFHOOK &&
+                emergencyTriggered &&
+                !ttsMessageSpoken
+            ) {
+                ttsMessageSpoken = true
+                enableSpeakerphone()
+
+                lifecycleScope.launch {
+                    delay(1_500L)
+                    speakEmergencyMessage()
+                }
+            } else if (state == TelephonyManager.CALL_STATE_IDLE && ttsMessageSpoken) {
+                restoreSpeakerphone()
+                ttsMessageSpoken = false
+                ttsRepeatCount = 0
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // Health Services
+    // ──────────────────────────────────────────────
 
     private val passiveClient by lazy {
         HealthServices.getClient(this).passiveMonitoringClient
@@ -160,8 +223,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        initTextToSpeech()
+//        stressPredictor = StressPredictor(this)
+
+        initTts()
         initSpeechRecognizer()
 
         setContent {
@@ -199,6 +266,21 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         startVoiceInput()
                     },
 
+                    alertTitle = alertTitle,
+                    alertBody = alertBody,
+                    selectedProfile = selectedProfile,
+                    onAlertDismiss = {
+                        alertTitle = null
+                    },
+                    onProfileSelect = { profile ->
+                        if (profile.isEmpty()) {
+                            selectedProfile = null
+                        } else {
+                            selectedProfile = profile
+                            sendAction("set_profile", mapOf("profile" to profile))
+                        }
+                    },
+
                     onStartFocus = {
                         startFocusSession()
                     },
@@ -233,7 +315,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         connectWebSocket()
         startAndroidSensors()
         startSendingLoop()
+//        startStressLoop()
         startLocationUpdates()
+        registerPhoneStateListener()
 
         if (hasPermissions()) {
             startPassiveMonitoring()
@@ -244,18 +328,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         super.onPause()
 
         stopSendingLoop()
+        stopStressLoop()
         stopPassiveMonitoring()
         stopAndroidSensors()
         stopLocationUpdates()
         disconnectWebSocket()
+        unregisterPhoneStateListener()
     }
 
     override fun onDestroy() {
         stopSendingLoop()
+        stopStressLoop()
         stopPassiveMonitoring()
         stopAndroidSensors()
         stopLocationUpdates()
         disconnectWebSocket()
+        unregisterPhoneStateListener()
+
+        alertDismissJob?.cancel()
+        alertDismissJob = null
 
         speechRecognizer?.destroy()
         speechRecognizer = null
@@ -264,38 +355,71 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         tts?.shutdown()
         tts = null
 
+        if (ttsMessageSpoken) {
+            restoreSpeakerphone()
+        }
+
+//        stressPredictor.close()
         wsClient.dispatcher.executorService.shutdown()
 
         super.onDestroy()
     }
 
     // ──────────────────────────────────────────────
-    // Text To Speech
+    // TTS general + emergency TTS
     // ──────────────────────────────────────────────
 
-    private fun initTextToSpeech() {
+    private fun initTts() {
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
                 val roResult = tts?.setLanguage(Locale("ro", "RO"))
 
-                if (roResult == TextToSpeech.LANG_MISSING_DATA ||
-                    roResult == TextToSpeech.LANG_NOT_SUPPORTED
-                ) {
-                    tts?.language = Locale.ENGLISH
+                ttsReady = roResult != TextToSpeech.LANG_MISSING_DATA &&
+                        roResult != TextToSpeech.LANG_NOT_SUPPORTED
+
+                if (!ttsReady) {
+                    tts?.setLanguage(Locale.getDefault())
+                    ttsReady = true
                 }
 
                 tts?.setSpeechRate(0.85f)
                 tts?.setPitch(1.05f)
-                isTtsReady = true
+
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+
+                    override fun onError(utteranceId: String?) {}
+
+                    override fun onDone(utteranceId: String?) {
+                        if (
+                            utteranceId == "emergency" &&
+                            ttsRepeatCount < EMERGENCY_TTS_REPEATS - 1
+                        ) {
+                            ttsRepeatCount++
+
+                            lifecycleScope.launch {
+                                delay(800)
+                                speakEmergencyMessage()
+                            }
+                        }
+                    }
+                })
             } else {
-                isTtsReady = false
+                ttsReady = false
                 Log.e("TTS", "TextToSpeech init failed")
             }
         }
     }
 
     private fun speak(text: String) {
-        if (!isTtsReady || text.isBlank()) return
+        if (!ttsReady || text.isBlank()) return
 
         tts?.speak(
             text,
@@ -303,6 +427,99 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             null,
             "mind_watch_tts_${System.currentTimeMillis()}"
         )
+    }
+
+    private suspend fun speakEmergencyMessage() {
+        if (!ttsReady) {
+            Log.w("EMERGENCY", "TTS nu e inițializat")
+            return
+        }
+
+        val lat = lastLocation?.latitude ?: 0.0
+        val lon = lastLocation?.longitude ?: 0.0
+        val locationText = resolveAddress(lat, lon)
+
+        val message = "Ajutor. Am o criză epileptică la locația $locationText"
+
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_VOICE_CALL)
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+        }
+
+        tts?.speak(
+            message,
+            TextToSpeech.QUEUE_FLUSH,
+            params,
+            "emergency"
+        )
+
+        Log.d(
+            "EMERGENCY",
+            "TTS vorbit (${ttsRepeatCount + 1}/$EMERGENCY_TTS_REPEATS): $message"
+        )
+    }
+
+    private suspend fun resolveAddress(lat: Double, lon: Double): String {
+        if (lat == 0.0 && lon == 0.0) {
+            return "necunoscută. Vă rog veniți urgent."
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                if (!Geocoder.isPresent()) {
+                    return@withContext "${"%.5f".format(lat)}, ${"%.5f".format(lon)}."
+                }
+
+                @Suppress("DEPRECATION")
+                val addresses = Geocoder(this@MainActivity, Locale("ro", "RO"))
+                    .getFromLocation(lat, lon, 1)
+
+                val address = addresses?.firstOrNull()
+
+                if (address != null) {
+                    val parts = listOfNotNull(
+                        address.thoroughfare,
+                        address.subThoroughfare,
+                        address.locality,
+                        address.adminArea
+                    )
+
+                    val text = if (parts.isNotEmpty()) {
+                        parts.joinToString(", ")
+                    } else {
+                        "${"%.5f".format(lat)}, ${"%.5f".format(lon)}"
+                    }
+
+                    "$text."
+                } else {
+                    "${"%.5f".format(lat)}, ${"%.5f".format(lon)}."
+                }
+            } catch (e: Exception) {
+                Log.w("EMERGENCY", "Geocoding eșuat: ${e.message}")
+                "${"%.5f".format(lat)}, ${"%.5f".format(lon)}."
+            }
+        }
+    }
+
+    private fun enableSpeakerphone() {
+        try {
+            previousSpeakerphoneOn = audioManager.isSpeakerphoneOn
+            audioManager.mode = AudioManager.MODE_IN_CALL
+            audioManager.isSpeakerphoneOn = true
+
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVolume, 0)
+        } catch (e: Exception) {
+            Log.w("EMERGENCY", "Nu am putut activa speakerphone: ${e.message}")
+        }
+    }
+
+    private fun restoreSpeakerphone() {
+        try {
+            audioManager.isSpeakerphoneOn = previousSpeakerphoneOn
+            audioManager.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) {
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -395,7 +612,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun startVoiceInput() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             ActivityCompat.requestPermissions(
@@ -456,6 +674,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                     runOnUiThread {
                         wsStatus = "WebSocket: conectat"
+
+                        selectedProfile?.let { profile ->
+                            sendAction("set_profile", mapOf("profile" to profile))
+                        }
                     }
                 }
 
@@ -517,9 +739,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             wsStatus = "Server state: $state"
 
             when (state) {
+                "profile_set" -> {
+                    val profile = json.get("profile")?.asString
+                    selectedProfile = profile
+                    status = "Profil activ: ${profile ?: "-"}"
+                }
+
                 "adhd_high_activity", "adhd_fidgeting" -> {
                     HapticManager.vibrate(this, HapticPattern.ANCHOR)
                     status = message
+
+                    getNotificationObject(json)?.let { notif ->
+                        showWatchNotification(
+                            title = notif.get("title")?.asString ?: "Alertă",
+                            body = notif.get("body")?.asString ?: ""
+                        )
+                    }
                 }
 
                 "pre_focus_ritual" -> {
@@ -581,6 +816,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     HapticManager.vibrate(this, HapticPattern.FOCUS_EXIT)
                     exitsCount = json.get("exits_count")?.asInt
                     status = "Ai ieșit din focus"
+
+                    getNotificationObject(json)?.let { notif ->
+                        showWatchNotification(
+                            title = notif.get("title")?.asString ?: "Focus întrerupt",
+                            body = notif.get("body")?.asString ?: ""
+                        )
+                    }
                 }
 
                 "focus_complete", "focus_end" -> {
@@ -593,33 +835,42 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     disableDnd()
                     focusReport = json
                     status = "Focus finalizat"
-                    speak("Focus finalizat.")
                 }
 
                 "hyperfocus_alert" -> {
                     HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
-                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                     status = message
-                    speak(message)
+
+                    showWatchNotification(
+                        title = "Hyperfocus detectat",
+                        body = message
+                    )
                 }
 
                 "medication_reminder" -> {
                     HapticManager.vibrate(this, HapticPattern.MEDICATION)
                     showMedicationDialog = true
                     status = "Reminder medicație"
-                    speak("Este timpul pentru medicație.")
                 }
 
                 "epilepsy_preictal" -> {
                     HapticManager.vibrate(this, HapticPattern.MEDICATION)
                     status = message
-                    speak("Am detectat o stare de risc. Rămâi într-un loc sigur.")
+
+                    showWatchNotification(
+                        title = "Stare de risc",
+                        body = message
+                    )
                 }
 
                 "epilepsy_warning" -> {
                     HapticManager.vibrate(this, HapticPattern.MEDICATION)
                     status = message
-                    speak("Atenție. Posibil stimul luminos periculos.")
+
+                    showWatchNotification(
+                        title = "Avertisment",
+                        body = message
+                    )
                 }
 
                 "epilepsy_alert" -> {
@@ -628,7 +879,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     val freq = json.get("freq")?.asDouble ?: 0.0
                     status = json.get("message")?.asString ?: "ALERTĂ EPILEPSIE ${freq} Hz"
 
-                    speak("Alertă de siguranță. Dacă poți, așază-te jos.")
+                    showWatchNotification(
+                        title = "Alertă siguranță",
+                        body = status
+                    )
 
                     consecutiveEpilepsyAlerts++
 
@@ -638,8 +892,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 }
 
                 "anxiety_alert", "stress_alert" -> {
-                    status = message
                     HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
+                    status = message
+
+                    getNotificationObject(json)?.let { notif ->
+                        showWatchNotification(
+                            title = notif.get("title")?.asString ?: "Stres detectat",
+                            body = notif.get("body")?.asString ?: "Respiră adânc. Ia o pauză."
+                        )
+                    }
 
                     sendAction(
                         "anxiety_checkin_start",
@@ -728,6 +989,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 "normal" -> {
                     consecutiveEpilepsyAlerts = 0
                     emergencyTriggered = false
+                    ttsMessageSpoken = false
                     status = message
                 }
 
@@ -739,6 +1001,29 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         } catch (e: Exception) {
             Log.e("WS_HEALTH", "Invalid server JSON: $text", e)
             wsStatus = "Server JSON invalid"
+        }
+    }
+
+    private fun getNotificationObject(json: JsonObject): JsonObject? {
+        return try {
+            if (json.has("notification") && json.get("notification").isJsonObject) {
+                json.getAsJsonObject("notification")
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun showWatchNotification(title: String, body: String) {
+        alertTitle = title
+        alertBody = body
+
+        alertDismissJob?.cancel()
+        alertDismissJob = lifecycleScope.launch {
+            delay(4000)
+            alertTitle = null
         }
     }
 
@@ -862,7 +1147,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     // ──────────────────────────────────────────────
 
     private fun startLocationUpdates() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
         ) return
 
@@ -887,6 +1173,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun triggerEmergency(freq: Double) {
         if (emergencyTriggered) return
         emergencyTriggered = true
+        ttsMessageSpoken = false
+        ttsRepeatCount = 0
 
         lifecycleScope.launch {
             delay(30_000L)
@@ -906,7 +1194,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun sendEmergencySms(phone: String, freq: Double, lat: Double, lon: Double) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             Log.w("EMERGENCY", "SMS permission not granted")
@@ -939,7 +1228,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun makeEmergencyCall(phone: String) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
             != PackageManager.PERMISSION_GRANTED
         ) {
             Log.w("EMERGENCY", "CALL_PHONE permission not granted")
@@ -955,8 +1245,26 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun registerPhoneStateListener() {
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
+            != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun unregisterPhoneStateListener() {
+        try {
+            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        } catch (_: Exception) {
+        }
+    }
+
     // ──────────────────────────────────────────────
-    // Sending sensor data
+    // Sending sensor data + local stress predictor
     // ──────────────────────────────────────────────
 
     private fun startSendingLoop() {
@@ -976,6 +1284,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun sendHealthData() {
+        feedStressPredictor()
+
         if (!isWsConnected || webSocket == null) return
 
         val payload = mapOf(
@@ -995,6 +1305,53 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         val json = gson.toJson(payload)
         webSocket?.send(json)
+    }
+
+    private fun feedStressPredictor() {
+        val acc = accelerometer ?: return
+        if (acc.size < 3) return
+
+        val hr = heartRate?.toFloat() ?: 0f
+//        stressPredictor.update(acc[0], acc[1], acc[2], hr)
+    }
+
+//    private fun startStressLoop() {
+//        if (stressJob != null) return
+//
+//        stressJob = lifecycleScope.launch {
+//            while (isActive) {
+//                delay(STRESS_POLL_MS)
+//
+//                val score = stressPredictor.predict() ?: continue
+//                Log.d("STRESS", "score=${"%.3f".format(score)}")
+//
+//                if (score >= STRESS_THRESHOLD) {
+//                    maybeShowStressAlert(score)
+//                }
+//            }
+//        }
+//    }
+
+    private fun stopStressLoop() {
+        stressJob?.cancel()
+        stressJob = null
+    }
+
+    private fun maybeShowStressAlert(score: Float) {
+        val now = System.currentTimeMillis()
+
+        if (now - lastStressAlertAt < STRESS_COOLDOWN_MS) return
+
+        lastStressAlertAt = now
+
+        HapticManager.vibrate(this, HapticPattern.HYPERFOCUS_SOFT)
+
+        status = "Stres detectat (${"%.0f".format(score * 100)}%)"
+
+        showWatchNotification(
+            title = "Stres detectat",
+            body = "Respiră adânc. Ia o pauză de un minut."
+        )
     }
 
     private fun getBatteryPayload(): Map<String, Any?> {
@@ -1044,43 +1401,57 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun requestPermissionsIfNeeded() {
         val permissionsToRequest = mutableListOf<String>()
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.ACTIVITY_RECOGNITION)
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.BODY_SENSORS)
         }
 
-        if (ContextCompat.checkSelfPermission(this, HR_PERMISSION)
+        if (
+            ContextCompat.checkSelfPermission(this, HR_PERMISSION)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(HR_PERMISSION)
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.SEND_SMS)
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.CALL_PHONE)
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionsToRequest.add(Manifest.permission.READ_PHONE_STATE)
+        }
+
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
@@ -1089,6 +1460,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (permissionsToRequest.isEmpty()) {
             status = "Permisiuni acceptate"
             startPassiveMonitoring()
+            registerPhoneStateListener()
             return
         }
 
@@ -1112,6 +1484,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             if (hasPermissions()) {
                 status = "Permisiuni acceptate"
                 startPassiveMonitoring()
+                registerPhoneStateListener()
             } else {
                 status = "Permisiuni lipsă"
             }

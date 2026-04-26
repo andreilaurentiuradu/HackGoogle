@@ -6,6 +6,7 @@ import json
 import uvicorn
 from datetime import datetime
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -49,6 +50,160 @@ app = FastAPI()
 brain = DecisionBrain()
 processor = DataStreamProcessor(brain)
 
+connected_clients = set()
+
+demo_anxiety = {
+    "active": False,
+    "hr": 135.0,
+    "until": 0.0,
+    "started_at": 0.0
+}
+
+
+# ──────────────────────────────────────────────
+# Demo Anxiety / Fake HR helpers
+# ──────────────────────────────────────────────
+
+def get_demo_hr():
+    if not demo_anxiety["active"]:
+        return None
+
+    now = time.time()
+
+    if demo_anxiety["until"] > 0 and now > demo_anxiety["until"]:
+        demo_anxiety["active"] = False
+        demo_anxiety["until"] = 0.0
+        print("[DEMO ANXIETY] Stopped automatically")
+        return None
+
+    return float(demo_anxiety["hr"])
+
+
+def apply_demo_hr_to_sensor_payload(payload: dict) -> dict:
+    demo_hr = get_demo_hr()
+
+    if demo_hr is None:
+        return payload
+
+    payload = dict(payload)
+
+    health_services = dict(payload.get("health_services") or {})
+    health_services["heart_rate"] = demo_hr
+
+    payload["health_services"] = health_services
+    payload["_demo_fake_hr"] = True
+
+    return payload
+
+
+def apply_demo_hr_to_action_payload(payload: dict) -> dict:
+    demo_hr = get_demo_hr()
+
+    if demo_hr is None:
+        return payload
+
+    action = payload.get("action")
+
+    if action in {
+        "anxiety_checkin_start",
+        "anxiety_answer",
+        "anxiety_voice_answer"
+    }:
+        payload = dict(payload)
+        payload["heart_rate"] = demo_hr
+
+    return payload
+
+
+async def broadcast_to_watches(message: dict):
+    dead_clients = []
+
+    for ws in list(connected_clients):
+        try:
+            await ws.send_text(json.dumps(message))
+        except Exception:
+            dead_clients.append(ws)
+
+    for ws in dead_clients:
+        connected_clients.discard(ws)
+
+
+# ──────────────────────────────────────────────
+# Demo REST endpoints
+# ──────────────────────────────────────────────
+
+@app.post("/demo/anxiety/start")
+async def demo_anxiety_start(hr: float = 145.0, seconds: int = 60):
+    """
+    Pornește demo-ul de anxietate:
+    - injectează puls fals mare în payload-urile primite de la ceas
+    - trimite imediat anxiety_alert către ceas
+    """
+
+    now = time.time()
+
+    demo_anxiety["active"] = True
+    demo_anxiety["hr"] = float(hr)
+    demo_anxiety["started_at"] = now
+    demo_anxiety["until"] = now + seconds if seconds > 0 else 0.0
+
+    response = {
+        "state": "anxiety_alert",
+        "message": f"Demo: puls ridicat detectat ({int(hr)} BPM). Hai să facem un exercițiu de grounding.",
+        "_debug": {
+            "demo_fake_hr": True,
+            "hr": hr,
+            "seconds": seconds
+        }
+    }
+
+    print("\n[DEMO ANXIETY] START")
+    print(f" Fake HR: {hr}")
+    print(f" Duration: {seconds}s")
+
+    _log(response)
+
+    await broadcast_to_watches(response)
+
+    return {
+        "status": "ok",
+        "demo": "anxiety",
+        "active": True,
+        "fake_hr": hr,
+        "seconds": seconds,
+        "connected_watches": len(connected_clients)
+    }
+
+
+@app.post("/demo/anxiety/stop")
+async def demo_anxiety_stop():
+    demo_anxiety["active"] = False
+    demo_anxiety["until"] = 0.0
+
+    print("\n[DEMO ANXIETY] STOP")
+
+    return {
+        "status": "ok",
+        "demo": "anxiety",
+        "active": False
+    }
+
+
+@app.get("/demo/anxiety/status")
+async def demo_anxiety_status():
+    demo_hr = get_demo_hr()
+
+    remaining = 0
+    if demo_anxiety["active"] and demo_anxiety["until"] > 0:
+        remaining = max(0, int(demo_anxiety["until"] - time.time()))
+
+    return {
+        "active": demo_anxiety["active"],
+        "fake_hr": demo_hr,
+        "remaining_seconds": remaining,
+        "connected_watches": len(connected_clients)
+    }
+
 
 # ──────────────────────────────────────────────
 # WebSocket principal
@@ -57,6 +212,8 @@ processor = DataStreamProcessor(brain)
 @app.websocket("/ws/health")
 async def health_ws(websocket: WebSocket):
     await websocket.accept()
+    connected_clients.add(websocket)
+
     print(f"\n[CONEXIUNE] Ceas conectat de la: {websocket.client.host}")
 
     pachete_count = 0
@@ -71,6 +228,8 @@ async def health_ws(websocket: WebSocket):
                 payload = json.loads(raw_data)
             except Exception:
                 continue
+
+            payload = apply_demo_hr_to_action_payload(payload)
 
             # ── Acțiuni inițiate de ceas ──────────────────
             if "action" in payload and "raw_sensors" not in payload:
@@ -111,14 +270,12 @@ async def health_ws(websocket: WebSocket):
                         })
                     )
 
-                # Pornit de ceas după ce primește anxiety_alert / stress_alert
                 elif action == "anxiety_checkin_start":
                     checkin_active = True
                     response = await start_anxiety_checkin(payload)
                     _log(response)
                     await websocket.send_text(json.dumps(response))
 
-                # Fallback pentru butonul Skip / Da / Nu
                 elif action == "anxiety_answer":
                     response = await next_anxiety_step(payload)
 
@@ -132,7 +289,6 @@ async def health_ws(websocket: WebSocket):
                     _log(response)
                     await websocket.send_text(json.dumps(response))
 
-                # Răspuns vocal transcris de ceas
                 elif action == "anxiety_voice_answer":
                     checkin_active = True
                     response = await next_voice_grounding_step(payload)
@@ -147,13 +303,36 @@ async def health_ws(websocket: WebSocket):
                     _log(response)
                     await websocket.send_text(json.dumps(response))
 
+                elif action == "set_profile":
+                    profile = payload.get("profile", "adhd")
+
+                    if profile not in {"adhd", "epilepsy"}:
+                        profile = "adhd"
+
+                    if hasattr(brain, "set_profile"):
+                        brain.set_profile(profile)
+                        print(f"\n[PROFIL] Schimbat la: {profile.upper()}")
+                    else:
+                        print(f"\n[PROFIL] Primit profil {profile}, dar brain.set_profile nu există.")
+
+                    await websocket.send_text(
+                        json.dumps({
+                            "state": "profile_set",
+                            "profile": profile,
+                            "message": f"Profil activ: {profile}"
+                        })
+                    )
+
                 continue
 
             # ── Date senzori normale ───────────────────────
+            payload = apply_demo_hr_to_sensor_payload(payload)
+
             if pachete_count % 5 == 0:
                 s = processor.stats
+                fake = " DEMO_HR" if payload.get("_demo_fake_hr") else ""
                 print(
-                    f"  [#{pachete_count}] "
+                    f"  [#{pachete_count}{fake}] "
                     f"lin_var={s.linear_acc_variance:.3f} "
                     f"gyro={s.gyro_mean:.3f} "
                     f"HR={s.hr:.0f} "
@@ -162,17 +341,6 @@ async def health_ws(websocket: WebSocket):
 
             analysis_result = processor.add_data(payload)
 
-            # ── TEST DEMO: pornește anxietatea automat după 10 pachete ──
-            # Poți șterge blocul ăsta când vrei să intre doar prin detecția reală.
-            if pachete_count == 10:
-                response = {
-                    "state": "anxiety_alert",
-                    "message": "Puls ridicat detectat. Hai să facem un exercițiu de grounding."
-                }
-                _log(response)
-                await websocket.send_text(json.dumps(response))
-                continue
-
             # Dacă suntem deja în conversația de anxietate, NU mai trimitem NORMAL peste UI.
             if checkin_active:
                 if pachete_count % 10 == 0:
@@ -180,7 +348,11 @@ async def health_ws(websocket: WebSocket):
                 continue
 
             # Verifică reminder medicație la fiecare pachet
-            med_alert = brain.medication.check_due()
+            try:
+                med_alert = brain.medication.check_due()
+            except Exception:
+                med_alert = None
+
             if med_alert:
                 _log(med_alert)
                 await websocket.send_text(json.dumps(med_alert))
@@ -197,6 +369,9 @@ async def health_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         print("\n[INFO] Ceas deconectat.")
 
+    finally:
+        connected_clients.discard(websocket)
+
 
 # ──────────────────────────────────────────────
 # Anxiety Check-in + Voice Grounding + Gemini
@@ -205,7 +380,6 @@ async def health_ws(websocket: WebSocket):
 async def start_anxiety_checkin(payload: dict) -> dict:
     """
     Primul pas al modului de anxietate.
-    Acum NU mai întrebăm Da/Nu direct.
     Pornim un exercițiu vocal de grounding.
     """
     heart_rate = payload.get("heart_rate", 0)
@@ -362,9 +536,6 @@ Rules:
 
 
 def normalize_voice_question(result: dict) -> dict:
-    """
-    Ne asigurăm că JSON-ul trimis la ceas are toate câmpurile necesare.
-    """
     result.setdefault("state", "anxiety_voice_question")
     result.setdefault("question_id", "grounding_see")
     result.setdefault("question", "Spune-mi trei lucruri pe care le vezi în jur.")
@@ -375,9 +546,6 @@ def normalize_voice_question(result: dict) -> dict:
 
 
 def fallback_voice_grounding(payload: dict) -> dict:
-    """
-    Fallback deterministic, ca demo-ul să nu pice dacă Gemini răspunde invalid.
-    """
     question_id = payload.get("question_id", "")
 
     print("\n[VOICE FALLBACK]")
@@ -421,15 +589,9 @@ def fallback_voice_grounding(payload: dict) -> dict:
 # ──────────────────────────────────────────────
 
 async def next_anxiety_step(payload: dict) -> dict:
-    """
-    Asta rămâne pentru butonul Skip / fallback.
-    Pentru conversația reală folosim anxiety_voice_answer.
-    """
     question_id = payload.get("question_id", "")
     positive = bool(payload.get("positive"))
 
-    # Dacă userul apasă Skip în timpul grounding-ului vocal,
-    # închidem blând exercițiul.
     if question_id.startswith("grounding") and not positive:
         return {
             "state": "anxiety_checkin_done",
@@ -718,6 +880,9 @@ def _log(result: dict):
                 f" │  focus activ    = DA  "
                 f"(exits: {result.get('exits_count', 0)})"
             )
+
+        if d.get("demo_fake_hr"):
+            print(f" │  demo_fake_hr   = DA")
 
         print(f" └────────────────────────────────────────")
 

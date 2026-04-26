@@ -129,6 +129,26 @@
       "exits_count": 0,
       "acc_stability_percent": 0,
       "hr_variability": "constant"
+    },
+    {
+      "date": "2026-04-26",
+      "start_time": "2026-04-26T04:48:10.421499",
+      "end_time": "2026-04-26T04:48:13.685615",
+      "duration_minutes": 1,
+      "quality_percent": 100,
+      "exits_count": 0,
+      "acc_stability_percent": 58,
+      "hr_variability": "constant"
+    },
+    {
+      "date": "2026-04-26",
+      "start_time": "2026-04-26T05:14:59.764613",
+      "end_time": "2026-04-26T05:15:06.540656",
+      "duration_minutes": 1,
+      "quality_percent": 100,
+      "exits_count": 0,
+      "acc_stability_percent": 97,
+      "hr_variability": "constant"
     }
   ],
   "medication_logs": [],
