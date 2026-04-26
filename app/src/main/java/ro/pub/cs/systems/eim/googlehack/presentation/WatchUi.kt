@@ -273,28 +273,31 @@ fun CheckInScreen(
     ) {
         Box(
             modifier = Modifier
-                .size(168.dp)
+                .size(150.dp)
                 .scale(softPulse)
                 .clip(CircleShape)
-                .background(Color(0xFF7C3AED).copy(alpha = 0.16f))
+                .background(Color(0xFF7C3AED).copy(alpha = 0.14f))
         )
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 22.dp),
+                .padding(horizontal = 14.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceEvenly
+            verticalArrangement = Arrangement.Center
         ) {
             Text(
                 text = if (isListening) "Ascult..." else "Grounding",
                 color = WatchColors.TextPrimary,
-                style = MaterialTheme.typography.caption1
+                style = MaterialTheme.typography.caption2,
+                textAlign = TextAlign.Center
             )
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             Box(
                 modifier = Modifier
-                    .size(76.dp)
+                    .size(58.dp)
                     .scale(if (isListening) pulse else 1f)
                     .clip(CircleShape)
                     .background(Color(0xFF2D1B69)),
@@ -304,61 +307,97 @@ fun CheckInScreen(
                     Text(
                         text = if (isListening) "🎙️" else "🌙",
                         color = WatchColors.TextPrimary,
-                        style = MaterialTheme.typography.title2
+                        style = MaterialTheme.typography.title3
                     )
 
                     Text(
-                        text = "${heartRate?.toInt() ?: "--"} BPM",
+                        text = "${heartRate?.toInt() ?: "--"}",
                         color = WatchColors.TextSecondary,
                         style = MaterialTheme.typography.caption2
                     )
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
             Text(
-                text = question.take(72),
+                text = question.take(88),
                 color = WatchColors.TextPrimary,
                 style = MaterialTheme.typography.caption1,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 4.dp)
             )
 
-            if (!lastTranscript.isNullOrBlank()) {
-                Text(
-                    text = "Ai spus: ${lastTranscript.take(38)}",
-                    color = Color(0xFFD8B4FE),
-                    style = MaterialTheme.typography.caption2,
-                    textAlign = TextAlign.Center
-                )
-            } else {
-                Text(
-                    text = if (isListening) "Vorbește acum..." else "Apasă și răspunde vocal",
-                    color = WatchColors.TextSecondary,
-                    style = MaterialTheme.typography.caption2,
-                    textAlign = TextAlign.Center
-                )
-            }
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = if (!lastTranscript.isNullOrBlank()) {
+                    "Ai spus: ${lastTranscript.take(34)}"
+                } else {
+                    if (isListening) "Vorbește acum..." else "Apasă pentru răspuns vocal"
+                },
+                color = if (!lastTranscript.isNullOrBlank()) {
+                    Color(0xFFD8B4FE)
+                } else {
+                    WatchColors.TextSecondary
+                },
+                style = MaterialTheme.typography.caption2,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             BigVoiceButton(
                 text = if (isListening) "Ascult..." else "Vorbește",
                 onClick = onStartVoiceInput
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                Text(
+            Spacer(modifier = Modifier.height(7.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ChoiceButton(
                     text = positive.take(8),
-                    color = Color(0xFFD8B4FE),
-                    style = MaterialTheme.typography.caption2,
-                    modifier = Modifier.safeClick { onPositive() }
+                    background = Color(0xFF3B1D72),
+                    textColor = Color(0xFFD8B4FE),
+                    onClick = onPositive
                 )
 
-                Text(
+                ChoiceButton(
                     text = negative.take(8),
-                    color = WatchColors.TextTertiary,
-                    style = MaterialTheme.typography.caption2,
-                    modifier = Modifier.safeClick { onNegative() }
+                    background = Color(0xFF1F1B2E),
+                    textColor = WatchColors.TextTertiary,
+                    onClick = onNegative
                 )
             }
         }
+    }
+}
+
+@Composable
+fun ChoiceButton(
+    text: String,
+    background: Color,
+    textColor: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(width = 56.dp, height = 26.dp)
+            .clip(CircleShape)
+            .background(background)
+            .safeClick { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = textColor,
+            style = MaterialTheme.typography.caption2,
+            textAlign = TextAlign.Center
+        )
     }
 }
 

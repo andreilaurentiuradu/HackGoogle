@@ -74,6 +74,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val EMERGENCY_PHONE = "+40728151136"
     private val EMERGENCY_TTS_REPEATS = 3
 
+    private val EPILEPSY_ALERT_WINDOW_MS = 30_000L
+    private val EMERGENCY_DELAY_MS = 10_000L
+
     private val STRESS_POLL_MS = 10_000L
     private val STRESS_COOLDOWN_MS = 90_000L
     private val STRESS_THRESHOLD = 0.55f
@@ -91,6 +94,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private lateinit var sensorManager: SensorManager
     private val registeredAndroidSensors = mutableListOf<Sensor>()
+    private var areAndroidSensorsStarted = false
 
     private var heartRate by mutableStateOf<Double?>(null)
     private var activityState by mutableStateOf<String?>(null)
@@ -141,17 +145,24 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var emergencyTriggered = false
     private var consecutiveEpilepsyAlerts = 0
+    private var lastEpilepsyAlertAt = 0L
+    private var emergencyJob: Job? = null
+
     private var lastLocation: Location? = null
     private lateinit var locationManager: LocationManager
+
     private val locationListener = LocationListener { location ->
         lastLocation = location
+        Log.d(
+            "LOCATION",
+            "Location updated: ${location.latitude}, ${location.longitude}"
+        )
     }
 
     // ──────────────────────────────────────────────
     // Local stress model
     // ──────────────────────────────────────────────
 
-//    private lateinit var stressPredictor: StressPredictor
     private var stressJob: Job? = null
     private var lastStressAlertAt = 0L
 
@@ -176,6 +187,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 emergencyTriggered &&
                 !ttsMessageSpoken
             ) {
+                Log.d("EMERGENCY", "Call is OFFHOOK. Starting emergency TTS.")
+
                 ttsMessageSpoken = true
                 enableSpeakerphone()
 
@@ -184,6 +197,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     speakEmergencyMessage()
                 }
             } else if (state == TelephonyManager.CALL_STATE_IDLE && ttsMessageSpoken) {
+                Log.d("EMERGENCY", "Call ended. Restoring speakerphone.")
+
                 restoreSpeakerphone()
                 ttsMessageSpoken = false
                 ttsRepeatCount = 0
@@ -212,6 +227,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         override fun onUserActivityInfoReceived(info: UserActivityInfo) {
             Log.d("PASSIVE_HEALTH", "Activity info: $info")
+
             runOnUiThread {
                 activityState = info.userActivityState.toString()
             }
@@ -221,12 +237,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        Log.d("LIFECYCLE", "onCreate")
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-//        stressPredictor = StressPredictor(this)
 
         initTts()
         initSpeechRecognizer()
@@ -312,10 +328,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onResume() {
         super.onResume()
 
+        Log.d("LIFECYCLE", "onResume")
+
         connectWebSocket()
         startAndroidSensors()
         startSendingLoop()
-//        startStressLoop()
         startLocationUpdates()
         registerPhoneStateListener()
 
@@ -327,16 +344,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onPause() {
         super.onPause()
 
-        stopSendingLoop()
-        stopStressLoop()
-        stopPassiveMonitoring()
-        stopAndroidSensors()
-        stopLocationUpdates()
-        disconnectWebSocket()
-        unregisterPhoneStateListener()
+        Log.d("LIFECYCLE", "onPause called, keeping WebSocket alive for demo")
+
+        /*
+         * IMPORTANT:
+         * Pe Wear OS, onPause() se cheamă foarte des:
+         * - când se stinge ecranul
+         * - când intră în ambient mode
+         * - când apare un overlay
+         *
+         * Dacă închidem WebSocket-ul aici, serverul vede mereu:
+         * connection closed -> connection open.
+         *
+         * Pentru demo, păstrăm conexiunea și senzorii activi.
+         */
     }
 
     override fun onDestroy() {
+        Log.d("LIFECYCLE", "onDestroy")
+
         stopSendingLoop()
         stopStressLoop()
         stopPassiveMonitoring()
@@ -345,8 +371,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         disconnectWebSocket()
         unregisterPhoneStateListener()
 
+        emergencyJob?.cancel()
+        emergencyJob = null
+
         alertDismissJob?.cancel()
         alertDismissJob = null
+
+        focusTimerJob?.cancel()
+        focusTimerJob = null
 
         speechRecognizer?.destroy()
         speechRecognizer = null
@@ -359,7 +391,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             restoreSpeakerphone()
         }
 
-//        stressPredictor.close()
         wsClient.dispatcher.executorService.shutdown()
 
         super.onDestroy()
@@ -395,7 +426,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
 
-                    override fun onError(utteranceId: String?) {}
+                    override fun onError(utteranceId: String?) {
+                        Log.e("TTS", "TTS error for utterance: $utteranceId")
+                    }
 
                     override fun onDone(utteranceId: String?) {
                         if (
@@ -411,6 +444,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         }
                     }
                 })
+
+                Log.d("TTS", "TTS ready")
             } else {
                 ttsReady = false
                 Log.e("TTS", "TextToSpeech init failed")
@@ -509,6 +544,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
             audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVolume, 0)
+
+            Log.d("EMERGENCY", "Speakerphone enabled")
         } catch (e: Exception) {
             Log.w("EMERGENCY", "Nu am putut activa speakerphone: ${e.message}")
         }
@@ -518,6 +555,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         try {
             audioManager.isSpeakerphoneOn = previousSpeakerphoneOn
             audioManager.mode = AudioManager.MODE_NORMAL
+
+            Log.d("EMERGENCY", "Speakerphone restored")
         } catch (_: Exception) {
         }
     }
@@ -672,6 +711,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     isWsConnected = true
                     this@MainActivity.webSocket = webSocket
 
+                    Log.d("WS_HEALTH", "WebSocket opened")
+
                     runOnUiThread {
                         wsStatus = "WebSocket: conectat"
 
@@ -709,6 +750,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     isWsConnected = false
                     this@MainActivity.webSocket = null
 
+                    Log.d("WS_HEALTH", "WebSocket closed: $code $reason")
+
                     runOnUiThread {
                         wsStatus = "WebSocket: închis"
                     }
@@ -719,7 +762,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun disconnectWebSocket() {
         isWsConnected = false
-        webSocket?.close(1000, "Activity stopped")
+        webSocket?.close(1000, "Activity destroyed")
         webSocket = null
         wsStatus = "WebSocket: închis"
     }
@@ -743,6 +786,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     val profile = json.get("profile")?.asString
                     selectedProfile = profile
                     status = "Profil activ: ${profile ?: "-"}"
+
+                    if (profile != "epilepsy") {
+                        resetEpilepsyEmergencyState()
+                    }
                 }
 
                 "adhd_high_activity", "adhd_fidgeting" -> {
@@ -884,11 +931,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         body = status
                     )
 
-                    consecutiveEpilepsyAlerts++
-
-                    if (consecutiveEpilepsyAlerts >= 2) {
-                        triggerEmergency(freq)
-                    }
+                    handleEpilepsyAlert(freq)
                 }
 
                 "anxiety_alert", "stress_alert" -> {
@@ -987,9 +1030,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 }
 
                 "normal" -> {
-                    consecutiveEpilepsyAlerts = 0
-                    emergencyTriggered = false
-                    ttsMessageSpoken = false
+                    val now = System.currentTimeMillis()
+
+                    if (now - lastEpilepsyAlertAt > EPILEPSY_ALERT_WINDOW_MS) {
+                        consecutiveEpilepsyAlerts = 0
+                        emergencyTriggered = false
+                        ttsMessageSpoken = false
+                    }
+
                     status = message
                 }
 
@@ -1002,6 +1050,44 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             Log.e("WS_HEALTH", "Invalid server JSON: $text", e)
             wsStatus = "Server JSON invalid"
         }
+    }
+
+    private fun handleEpilepsyAlert(freq: Double) {
+        val now = System.currentTimeMillis()
+
+        consecutiveEpilepsyAlerts = if (
+            lastEpilepsyAlertAt > 0 &&
+            now - lastEpilepsyAlertAt <= EPILEPSY_ALERT_WINDOW_MS
+        ) {
+            consecutiveEpilepsyAlerts + 1
+        } else {
+            1
+        }
+
+        lastEpilepsyAlertAt = now
+
+        Log.d(
+            "EMERGENCY",
+            "Epilepsy alert count=$consecutiveEpilepsyAlerts, freq=$freq, emergencyTriggered=$emergencyTriggered"
+        )
+
+        if (consecutiveEpilepsyAlerts >= 2) {
+            Log.d("EMERGENCY", "2 epilepsy alerts inside window. Emergency will start in ${EMERGENCY_DELAY_MS / 1000}s.")
+            triggerEmergency(freq)
+        }
+    }
+
+    private fun resetEpilepsyEmergencyState() {
+        consecutiveEpilepsyAlerts = 0
+        lastEpilepsyAlertAt = 0L
+        emergencyTriggered = false
+        ttsMessageSpoken = false
+        ttsRepeatCount = 0
+
+        emergencyJob?.cancel()
+        emergencyJob = null
+
+        Log.d("EMERGENCY", "Epilepsy emergency state reset")
     }
 
     private fun getNotificationObject(json: JsonObject): JsonObject? {
@@ -1150,15 +1236,29 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
-        ) return
+        ) {
+            Log.w("LOCATION", "ACCESS_FINE_LOCATION permission not granted")
+            return
+        }
 
         for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
             try {
-                locationManager.requestLocationUpdates(provider, 30_000L, 10f, locationListener)
+                locationManager.requestLocationUpdates(
+                    provider,
+                    10_000L,
+                    10f,
+                    locationListener
+                )
+
                 locationManager.getLastKnownLocation(provider)?.let {
                     lastLocation = it
+                    Log.d(
+                        "LOCATION",
+                        "Last known location from $provider: ${it.latitude}, ${it.longitude}"
+                    )
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w("LOCATION", "Could not request location from $provider: ${e.message}")
             }
         }
     }
@@ -1171,16 +1271,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun triggerEmergency(freq: Double) {
-        if (emergencyTriggered) return
+        if (emergencyTriggered) {
+            Log.d("EMERGENCY", "Emergency already triggered, skipping duplicate.")
+            return
+        }
+
         emergencyTriggered = true
         ttsMessageSpoken = false
         ttsRepeatCount = 0
 
-        lifecycleScope.launch {
-            delay(30_000L)
+        Log.d("EMERGENCY", "Emergency trigger started. Waiting ${EMERGENCY_DELAY_MS / 1000}s before SMS/call.")
+
+        emergencyJob?.cancel()
+        emergencyJob = lifecycleScope.launch {
+            delay(EMERGENCY_DELAY_MS)
 
             val lat = lastLocation?.latitude ?: 0.0
             val lon = lastLocation?.longitude ?: 0.0
+
+            Log.d("EMERGENCY", "Sending SMS and starting call now. lat=$lat lon=$lon freq=$freq")
 
             sendEmergencySms(
                 EMERGENCY_PHONE,
@@ -1240,6 +1349,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phone"))
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             startActivity(intent)
+
+            Log.d("EMERGENCY", "Emergency call intent started")
         } catch (e: Exception) {
             Log.e("EMERGENCY", "Call failed", e)
         }
@@ -1250,7 +1361,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
             != PackageManager.PERMISSION_GRANTED
-        ) return
+        ) {
+            Log.w("EMERGENCY", "READ_PHONE_STATE permission not granted")
+            return
+        }
 
         telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
     }
@@ -1264,7 +1378,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     // ──────────────────────────────────────────────
-    // Sending sensor data + local stress predictor
+    // Sending sensor data
     // ──────────────────────────────────────────────
 
     private fun startSendingLoop() {
@@ -1312,25 +1426,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (acc.size < 3) return
 
         val hr = heartRate?.toFloat() ?: 0f
-//        stressPredictor.update(acc[0], acc[1], acc[2], hr)
-    }
 
-//    private fun startStressLoop() {
-//        if (stressJob != null) return
-//
-//        stressJob = lifecycleScope.launch {
-//            while (isActive) {
-//                delay(STRESS_POLL_MS)
-//
-//                val score = stressPredictor.predict() ?: continue
-//                Log.d("STRESS", "score=${"%.3f".format(score)}")
-//
-//                if (score >= STRESS_THRESHOLD) {
-//                    maybeShowStressAlert(score)
-//                }
-//            }
-//        }
-//    }
+        // Dacă reactivezi predictorul local Android, îl chemi aici.
+        // stressPredictor.update(acc[0], acc[1], acc[2], hr)
+    }
 
     private fun stopStressLoop() {
         stressJob?.cancel()
@@ -1485,6 +1584,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 status = "Permisiuni acceptate"
                 startPassiveMonitoring()
                 registerPhoneStateListener()
+                startLocationUpdates()
             } else {
                 status = "Permisiuni lipsă"
             }
@@ -1576,6 +1676,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     // ──────────────────────────────────────────────
 
     private fun startAndroidSensors() {
+        if (areAndroidSensorsStarted) return
+
         registeredAndroidSensors.clear()
 
         val sensorTypes = listOf(
@@ -1600,11 +1702,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 Log.d("RAW_SENSORS", "Not available type=$type")
             }
         }
+
+        areAndroidSensorsStarted = true
     }
 
     private fun stopAndroidSensors() {
+        if (!areAndroidSensorsStarted) return
+
         sensorManager.unregisterListener(this)
         registeredAndroidSensors.clear()
+        areAndroidSensorsStarted = false
     }
 
     override fun onSensorChanged(event: SensorEvent) {
