@@ -1,5 +1,10 @@
 package ro.pub.cs.systems.eim.googlehack.presentation
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
@@ -30,6 +37,7 @@ import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.TimeText
 import androidx.wear.compose.material.dialog.Alert
 import com.google.gson.JsonObject
+import kotlinx.coroutines.delay
 
 fun Modifier.safeClick(onClick: () -> Unit): Modifier {
     return this.pointerInput(Unit) {
@@ -42,15 +50,29 @@ fun WatchApp(
     status: String,
     wsStatus: String,
     heartRate: Double?,
+
     isFocusActive: Boolean,
     focusSeconds: Int,
     focusReport: JsonObject?,
     exitsCount: Int?,
+
     showMedicationDialog: Boolean,
+
     isBreathingActive: Boolean,
     breathingPhase: String,
     breathingStep: Int,
     breathingTotal: Int,
+
+    isCheckInActive: Boolean,
+    checkInQuestion: String?,
+    checkInPositive: String,
+    checkInNegative: String,
+    isListening: Boolean,
+    lastTranscript: String?,
+    onCheckInPositive: () -> Unit,
+    onCheckInNegative: () -> Unit,
+    onStartVoiceInput: () -> Unit,
+
     onStartFocus: () -> Unit,
     onStopFocus: () -> Unit,
     onMedicationTaken: () -> Unit,
@@ -65,6 +87,18 @@ fun WatchApp(
                 .background(Color.Black)
         ) {
             when {
+                isCheckInActive -> {
+                    CheckInScreen(
+                        question = checkInQuestion ?: "Spune-mi trei lucruri pe care le vezi.",
+                        negative = checkInNegative,
+                        heartRate = heartRate,
+                        isListening = isListening,
+                        lastTranscript = lastTranscript,
+                        onStartVoiceInput = onStartVoiceInput,
+                        onSkip = onCheckInNegative
+                    )
+                }
+
                 isBreathingActive -> {
                     BreathingFocusScreen(
                         phase = breathingPhase,
@@ -130,6 +164,144 @@ fun WatchApp(
                 )
             }
         }
+    }
+}
+
+@Composable
+fun CheckInScreen(
+    question: String,
+    negative: String,
+    heartRate: Double?,
+    isListening: Boolean,
+    lastTranscript: String?,
+    onStartVoiceInput: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "grounding")
+
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(850),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+
+    val softPulse by infiniteTransition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.04f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1300),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "softPulse"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF120F24)),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(168.dp)
+                .scale(softPulse)
+                .clip(CircleShape)
+                .background(Color(0xFF7C3AED).copy(alpha = 0.16f))
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Text(
+                text = if (isListening) "Ascult..." else "Grounding",
+                color = Color.White,
+                style = MaterialTheme.typography.caption1
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(74.dp)
+                    .scale(if (isListening) pulse else 1f)
+                    .clip(CircleShape)
+                    .background(Color(0xFF2D1B69)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = if (isListening) "🎙️" else "🌙",
+                        color = Color.White,
+                        style = MaterialTheme.typography.title2
+                    )
+
+                    Text(
+                        text = "${heartRate?.toInt() ?: "--"}",
+                        color = Color.LightGray,
+                        style = MaterialTheme.typography.caption2
+                    )
+                }
+            }
+
+            Text(
+                text = question.take(62),
+                color = Color.White,
+                style = MaterialTheme.typography.caption1
+            )
+
+            if (!lastTranscript.isNullOrBlank()) {
+                Text(
+                    text = "Ai spus: ${lastTranscript.take(34)}",
+                    color = Color(0xFFD8B4FE),
+                    style = MaterialTheme.typography.caption2
+                )
+            } else {
+                Text(
+                    text = if (isListening) "Vorbește acum..." else "Apasă și răspunde vocal",
+                    color = Color.LightGray,
+                    style = MaterialTheme.typography.caption2
+                )
+            }
+
+            BigVoiceButton(
+                text = if (isListening) "Ascult..." else "Vorbește",
+                onClick = onStartVoiceInput
+            )
+
+            Text(
+                text = negative.take(8),
+                color = Color.Gray,
+                style = MaterialTheme.typography.caption2,
+                modifier = Modifier.safeClick { onSkip() }
+            )
+        }
+    }
+}
+
+@Composable
+fun BigVoiceButton(
+    text: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(width = 124.dp, height = 42.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF7C3AED))
+            .safeClick { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = MaterialTheme.typography.caption1
+        )
     }
 }
 
@@ -308,10 +480,7 @@ fun BreathingFocusScreen(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 modifier = Modifier
                     .size(circleSize)
@@ -408,12 +577,12 @@ fun CalmScreen(
 ) {
     var phase by remember { mutableStateOf("Inhale") }
 
-    androidx.compose.runtime.LaunchedEffect(Unit) {
+    LaunchedEffect(Unit) {
         while (true) {
             phase = "Inhale"
-            kotlinx.coroutines.delay(5000)
+            delay(5000)
             phase = "Exhale"
-            kotlinx.coroutines.delay(5000)
+            delay(5000)
         }
     }
 
